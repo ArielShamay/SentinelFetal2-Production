@@ -1,0 +1,17 @@
+# SentinelFetal2-Production
+torch>=2.0.0
+numpy>=1.24,<2.0
+pandas>=1.5
+scikit-learn>=1.2
+scipy>=1.9
+pyyaml>=6.0
+# FastAPI backend (Phase 3)
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.0
+pydantic-settings>=2.0
+websockets>=12.0
+# UI (legacy Dash — superseded by React frontend in Phase 5)
+dash>=2.14
+dash-bootstrap-components>=1.4
+plotly>=5.18

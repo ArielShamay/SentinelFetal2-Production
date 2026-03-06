@@ -1,0 +1,45 @@
+# Patient data - never commit
+data/
+
+# Large model weight files
+weights/
+
+# Claude session files
+.claude/
+
+# Logs
+logs/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+venv/
+.venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Secrets / env
+.env
+.env.*
+*.key
+*.pem
+secrets.json
