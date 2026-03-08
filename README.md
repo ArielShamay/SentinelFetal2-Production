@@ -68,8 +68,8 @@ cd SentinelFetal2-Production
 ### 2. Install Python dependencies
 
 ```bash
-python -m pip install fastapi uvicorn[standard] pydantic numpy scipy scikit-learn
-python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
 > For GPU support, replace the torch install URL with the appropriate CUDA version from https://pytorch.org/get-started/locally/
@@ -112,12 +112,11 @@ Open **two terminals** from the project root.
 python -m uvicorn api.main:app --port 8000
 ```
 
-Expected output:
+Wait for:
 ```
 SentinelFetal2 starting up
 Loaded 5 PatchTST fold models
 SegmentStore loaded: 2479 entries across 9 event types
-SentinelFetal2 startup complete. beds=4
 Uvicorn running on http://0.0.0.0:8000
 ```
 
@@ -128,7 +127,7 @@ cd frontend
 npm run dev
 ```
 
-Expected output:
+Wait for:
 ```
 VITE v5.4.x  ready in ~800ms
 Local:   http://localhost:5173/
@@ -136,14 +135,27 @@ Local:   http://localhost:5173/
 
 ### Start the simulation
 
-Once both servers are running, open your browser at **http://localhost:5173**.
+1. Open **http://localhost:5173** in your browser.
+2. In the top bar, set the **Beds** counter (1–16) to the number of beds you want.
+3. Click **▶ Start** — the system assigns random CTG recordings to each bed and begins streaming.
+4. After ~450 seconds (7.5 min) of warmup per bed, risk scores begin appearing.
 
-Click **"Start Simulation"** in the top bar. The system will:
-1. Assign random CTG recordings to 4 beds
-2. Begin streaming at real-time speed (1x)
-3. After ~450 seconds of warmup, risk scores start appearing
+> **Tip:** Click **10×** to compress warmup to ~45 seconds.
 
-> **Tip:** Click the speed control and set it to **10x** to skip warmup in ~45 seconds.
+### Stopping the System
+
+**Stop the simulation** (keeps servers running, resets all beds):
+- Click **⏹ Stop** in the top bar.
+
+**Shut down the backend**:
+- Press `Ctrl+C` in Terminal 1 (uvicorn).
+
+**Shut down the frontend**:
+- Press `Ctrl+C` in Terminal 2 (Vite).
+
+### Viewing a bed in detail
+
+Click any bed card — a **floating modal** opens over the ward showing the full CTG chart, risk gauge, clinical findings, and alert history. All other bed cards continue updating in the background. Close with **×** or by clicking outside the panel.
 
 ---
 
@@ -151,7 +163,7 @@ Click **"Start Simulation"** in the top bar. The system will:
 
 God Mode lets you inject pathological CTG events manually into any bed — useful for demonstrating the system's response to known patterns.
 
-1. Navigate to any bed's detail view (click a bed card)
+1. Click any bed card to open its detail modal
 2. In the **God Mode** panel, enter the PIN: `1234`
 3. Select an event type (e.g. "Late Decels"), set severity and duration
 4. Click **"Inject Event"**

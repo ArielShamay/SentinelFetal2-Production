@@ -59,7 +59,7 @@ without needing to open source files.
                               ▼
        ┌──────────────────────────────────────────┐
        │  PipelineManager                         │  api/services/pipeline_manager.py
-       │  ThreadPoolExecutor(max_workers=4)        │
+       │  ThreadPoolExecutor(max_workers=8)        │
        │  Backpressure: max 50 pending/bed         │
        │                                          │
        │  Per sample in worker thread:            │
@@ -68,7 +68,7 @@ without needing to open source files.
        │    3. pipeline.on_new_sample() ← AFTER   │
        └──────────┬───────────────────────────────┘
                   │                    │
-         chart tick               BedState (every 24 samples)
+         chart tick               BedState (every 40 samples)
                   │                    │
                   ▼                    ▼
        ┌─────────────────────────────────────────────┐
@@ -102,10 +102,10 @@ without needing to open source files.
 
 The system splits into **two independent data flows** at the broadcaster level:
 
-- **Flow A — Inference**: sample → SentinelRealtime (PatchTST ensemble, runs every 24 samples) → BedState → Zustand store → React UI (risk score, clinical features, alert state)
+- **Flow A — Inference**: sample → SentinelRealtime (PatchTST ensemble, runs every 40 samples) → BedState → Zustand store → React UI (risk score, clinical features, alert state)
 - **Flow B — Chart Ticks**: sample → denormalize → push_chart_tick → WebSocket → chartUpdateBus → lightweight-charts (raw waveform at 4 Hz)
 
-Flow B runs every sample. Flow A runs every 24 samples (every 6 seconds).
+Flow B runs every sample. Flow A runs every 40 samples (every 10 seconds).
 
 ---
 
@@ -174,7 +174,7 @@ At speed 10×, `ticks_this_cycle = 10`. Without yielding, the event loop would b
 
 **Key design**:
 ```python
-self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sentinel-inf")
+self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sentinel-inf")
 self._pending: dict[str, int] = defaultdict(int)   # per-bed pending task counter
 ```
 
@@ -493,7 +493,7 @@ This section is critical for understanding the chart smoothness design.
 
 ```
 sample N (every sample) → on_new_sample()
-  → if N % 24 == 0 AND N >= 1800:
+  → if (N - offset) % 40 == 0 AND N >= 1800:
       run PatchTST → BedState
       → broadcaster.push(state)
       → drain loop (≤50ms later) → batch_update.updates[]
@@ -502,9 +502,9 @@ sample N (every sample) → on_new_sample()
       → React re-render (WardView risk score, DetailView panels)
 ```
 
-- Frequency: every 24 samples = **every 6 seconds**.
+- Frequency: every 40 samples = **every 10 seconds** (staggered per bed — see Fix 10).
 - Latency: up to 200ms PatchTST + up to 50ms drain = **up to 250ms**.
-- Content: full clinical state — risk score, all features, `fhr_latest`/`uc_latest` (last 24 BPM values), alert flag.
+- Content: full clinical state — risk score, all features, `fhr_latest`/`uc_latest` (last 40 BPM values), alert flag.
 - Side effects: triggers `playAlertTone()` if alert transitions false → true.
 
 ### Flow B: Chart Ticks (fast, raw)
@@ -818,18 +818,27 @@ Sets God Mode injection event markers on the FHR series (arrow-down at start, ar
 ```typescript
 function App() {
     useBedStream()    // mount WebSocket — runs globally for app lifetime
+    const selectedBedId    = useUIStore(s => s.selectedBedId)
+    const setSelectedBedId = useUIStore(s => s.setSelectedBedId)
     return (
-        <BrowserRouter>
+        <>
+            {/* Modal overlay — WardView stays mounted underneath */}
+            {selectedBedId && (
+                <div className="fixed inset-0 z-40 bg-black/40" onClick={() => setSelectedBedId(null)}>
+                    <div onClick={e => e.stopPropagation()}>
+                        <DetailView bedId={selectedBedId} onClose={() => setSelectedBedId(null)} />
+                    </div>
+                </div>
+            )}
             <Routes>
-                <Route path="/"         element={<WardView />} />
-                <Route path="/bed/:id"  element={<DetailView />} />
+                <Route path="/" element={<WardView />} />
             </Routes>
-        </BrowserRouter>
+        </>
     )
 }
 ```
 
-`useBedStream()` is called at the App level so the WebSocket connection is persistent across route changes. Navigation between WardView and DetailView does NOT disconnect the WebSocket.
+There is only one route (`/`). Clicking a bed card opens `DetailView` in a floating modal overlay — `WardView` is never unmounted, so all 16 mini CTG charts keep streaming without interruption. The `/bed/:id` route has been removed. `uiStore.selectedBedId` drives modal visibility.
 
 ---
 
@@ -849,8 +858,8 @@ export const WardView: React.FC = () => {
 
     // useCallback: stable reference prevents BedCard re-renders from onClick prop change
     const handleClick = useCallback(
-        (bedId: string) => navigate(`/bed/${bedId}`),
-        [navigate],
+        (bedId: string) => setSelectedBedId(bedId),
+        [setSelectedBedId],
     )
 
     return (
@@ -902,23 +911,30 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
 ### 5.4 DetailView
 
 ```typescript
-function DetailView() {
-    const { id } = useParams()
-    const bed = useBedStore(s => s.beds.get(id!))
+interface Props {
+    bedId?: string    // passed when used as a modal
+    onClose?: () => void
+}
+
+function DetailView({ bedId: propBedId, onClose }: Props) {
+    const { id: routeId } = useParams()
+    const id = propBedId ?? routeId       // prop takes precedence over URL
 
     return (
         <div>
-            <CTGChart bedId={id!} baselineBpm={bed?.baselineBpm} activeEvents={bed?.activeEvents} />
-            {/* Risk trend chart */}
-            {/* Clinical feature panels */}
+            {/* Back button — calls onClose() in modal mode, Link to "/" in route mode */}
+            <CTGChart bedId={id} baselineBpm={bed?.baselineBpm} activeEvents={bed?.activeEvents} />
+            {/* Risk gauge, clinical feature panels, alert history, god mode */}
         </div>
     )
 }
 ```
 
-- `CTGChart` here is in full (non-compact) mode → history is loaded synchronously on mount via `setData()`.
-- `baselineBpm` and `activeEvents` come from Zustand (updated by Flow A every 6s).
+- Used exclusively as a modal (no route). `bedId` prop is always provided by `App.tsx`.
+- `CTGChart` in full (non-compact) mode → history is loaded synchronously on mount via `setData()`.
+- `baselineBpm` and `activeEvents` come from Zustand (updated by Flow A every 10s).
 - After history load, live ticks from Flow B continue updating the chart at 4 Hz seamlessly.
+- When the modal opens, WardView's mini charts remain mounted and continue receiving ticks.
 
 ---
 
@@ -1080,6 +1096,16 @@ This section documents all performance issues identified and fixed to make the s
 
 **Fix**: Use `buf.slice(-MAX_BUFFER)` which creates a new array in O(1) (reference copy of the backing store). Added hysteresis of 100: trimming only runs when the buffer exceeds `MAX_BUFFER + 100`, avoiding a trim on every single publish call.
 
+### Fix 10 — CPU saturation at 16 beds (pipeline_manager.py + pipeline.py)
+
+**Problem**: Endurance test (35 min, 16 beds) showed 54–81% CPU once all 16 beds entered the inference phase. Root cause: all 16 beds hit their 1800-sample warmup threshold at exactly the same tick and then fired inference simultaneously every 24 samples (6s). With `max_workers=4`, the 4 threads were continuously saturated.
+
+**Fix — two changes:**
+1. **Inference staggering**: `SentinelRealtime` accepts `inference_offset: int`. Inference fires when `(sample_count - offset) % stride == 0` instead of `sample_count % stride == 0`. `PipelineManager.set_beds()` computes `offset = (i * stride) // n_beds` for each bed index `i`, spreading N beds evenly across one stride window. With 16 beds, at most 1–2 beds fire inference per sample tick instead of all 16 simultaneously.
+2. **Wider stride + more workers**: `_INFERENCE_STRIDE` increased from 24 (6s) to 40 (10s), reducing inference throughput from 2.7/s to 1.6/s. `max_workers` raised from 4 to 8.
+
+**What is NOT staggered**: Chart ticks (Flow B) are still pushed unconditionally every sample for every bed — the waveforms update simultaneously at 4 Hz without any staggering.
+
 ---
 
 ## 9. Data Formats and Normalization
@@ -1106,9 +1132,9 @@ uc_mmhg  = uc_norm * 100.0             # chart display mmHg
 - `fhr`: BPM (float, 1 decimal).
 - `uc`: mmHg (float, 1 decimal).
 
-### BedUpdate (inference, every 6s)
-- `fhr_latest`: array of 24 BPM values (the 24 samples from the last inference window).
-- `uc_latest`: array of 24 mmHg values.
+### BedUpdate (inference, every 10s)
+- `fhr_latest`: array of 40 BPM values (the 40 samples from the last inference window).
+- `uc_latest`: array of 40 mmHg values.
 - These are pushed into `bedStore.fhrRing`/`ucRing` (size 2400 = 10min × 4Hz).
 - **Not used for the chart** — chart uses `chart_ticks` from Flow B.
 
@@ -1150,7 +1176,7 @@ uc_mmhg  = uc_norm * 100.0             # chart display mmHg
 
 | File | Purpose |
 |------|---------|
-| `frontend/src/App.tsx` | Root component: routes, mounts useBedStream |
+| `frontend/src/App.tsx` | Root component: WS stream, modal overlay for DetailView, single `/` route |
 | `frontend/src/types.ts` | TypeScript interfaces: BedUpdate, ChartTick, WSMessage, EventAnnotation |
 | `frontend/src/services/wsClient.ts` | Singleton WebSocket with exponential backoff reconnect |
 | `frontend/src/hooks/useBedStream.ts` | WebSocket message router: bedStore + chartUpdateBus |
@@ -1159,9 +1185,9 @@ uc_mmhg  = uc_norm * 100.0             # chart display mmHg
 | `frontend/src/utils/chartUpdateBus.ts` | Singleton pub/sub + ring buffer (slice/hysteresis trim) for 4 Hz chart ticks |
 | `frontend/src/utils/ringBuffer.ts` | Generic O(1) ring buffer for bedStore |
 | `frontend/src/utils/alertSound.ts` | Play alert tone on risk threshold breach |
-| `frontend/src/components/ward/WardView.tsx` | Ward grid with useMemo sort + useCallback handler |
+| `frontend/src/components/ward/WardView.tsx` | Ward grid with useMemo sort + useCallback; click → setSelectedBedId (modal) |
 | `frontend/src/components/ward/BedCard.tsx` | Single bed tile: risk badge, mini CTG chart (compact); React.memo + useCallback |
-| `frontend/src/components/detail/DetailView.tsx` | Full bed view: full CTG chart with history, clinical panels |
+| `frontend/src/components/detail/DetailView.tsx` | Full bed view rendered in modal overlay; accepts bedId+onClose props |
 | `frontend/src/components/detail/CTGChart.tsx` | lightweight-charts container div, compact/full mode (h-28 / h-72) |
 | `frontend/src/components/GodModePanel.tsx` | God Mode controls: inject events, set PIN |
 
@@ -1186,11 +1212,11 @@ uc_mmhg  = uc_norm * 100.0             # chart display mmHg
 
 CPU stays at 22–25% during warmup (first 7.5 minutes, no inference). Once all 16 beds hit their 1800-sample warmup threshold simultaneously (T+07:30), CPU jumps to 54–81% and stays there.
 
-**Root cause:** `ThreadPoolExecutor(max_workers=4)` in `api/pipeline_manager.py` is saturated. At 16 beds × 1 inference/6s × 5 ensemble folds, the executor is fully loaded every cycle. Workers cannot drain fast enough, causing queueing and CPU contention.
+**Root cause:** All 16 beds fired inference simultaneously every 6s, saturating `ThreadPoolExecutor(max_workers=4)`.
 
 **What is unaffected:** Memory and WS lag remain excellent throughout. The system is functionally stable — all CTG charts update, all alerts fire, no frames dropped.
 
-**Fix applied (inference staggering):** `SentinelRealtime` now accepts `inference_offset: int`. `PipelineManager.set_beds()` computes `offset = (i * 24) // n_beds` for bed index `i`, spreading all N beds evenly across the 24-sample (6s) stride window. With 16 beds, at most 1–2 beds fire inference per sample tick instead of all 16 simultaneously. Re-run endurance test to confirm CPU drops below 40%.
+**Fix applied (Fix 10):** Inference staggered across beds + stride extended 6s → 10s + max_workers raised 4 → 8. See Section 8 Fix 10 for full details. Re-run endurance test to confirm CPU drops below 40%.
 
 ### Memory Stability Confirmation
 
@@ -1201,4 +1227,4 @@ Ring buffer plateau confirmed:
 
 ---
 
-*Last updated: reflects codebase state after Phase 8 endurance test (2026-03-08).*
+*Last updated: 2026-03-08 — reflects codebase state after Phase 8 endurance test, CPU stagger fix (Fix 10), inference stride 10s, max_workers=8, and UI modal refactor.*
