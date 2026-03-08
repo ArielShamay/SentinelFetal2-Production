@@ -1,8 +1,10 @@
 // src/stores/uiStore.ts
-// Global UI state: layout, speed, sound, simulation status, god-mode stub.
+// Global UI state: layout, speed, sound, simulation status, god-mode.
 
 import { create } from 'zustand'
 import { setMuted } from '../utils/alertSound'
+
+const STORAGE_KEY = 'sentinel_gm_pin'
 
 interface UIStore {
   gridColumns: number          // 1 | 2 | 3 | 4  — grid is gridColumns×gridColumns
@@ -11,8 +13,8 @@ interface UIStore {
   soundMuted: boolean
   simulationRunning: boolean   // reconciled from /api/simulation/status
   simulationPaused: boolean    // reconciled from /api/simulation/status
-  godModeUnlocked: boolean     // Phase 6 stub — toggled by passcode dialog
-  godModePin: string           // Phase 6 stub — PIN entered by user
+  godModeUnlocked: boolean     // true when PIN has been validated
+  godModePin: string | null    // stored in sessionStorage — cleared on tab close
 
   setGridColumns: (n: number) => void
   setSelectedBedId: (id: string | null) => void
@@ -20,9 +22,11 @@ interface UIStore {
   setSoundMuted: (v: boolean) => void
   setSimulationRunning: (v: boolean) => void
   setSimulationPaused: (v: boolean) => void
-  setGodModeUnlocked: (v: boolean) => void
   setGodModePin: (pin: string) => void
+  clearGodModePin: () => void
 }
+
+const storedPin = sessionStorage.getItem(STORAGE_KEY)
 
 export const useUIStore = create<UIStore>(set => ({
   gridColumns: 2,
@@ -31,8 +35,8 @@ export const useUIStore = create<UIStore>(set => ({
   soundMuted: false,
   simulationRunning: false,
   simulationPaused: false,
-  godModeUnlocked: false,
-  godModePin: '',
+  godModeUnlocked: storedPin !== null,
+  godModePin: storedPin,
 
   setGridColumns: (n: number) => set({ gridColumns: n }),
   setSelectedBedId: (id: string | null) => set({ selectedBedId: id }),
@@ -43,6 +47,14 @@ export const useUIStore = create<UIStore>(set => ({
   },
   setSimulationRunning: (v: boolean) => set({ simulationRunning: v }),
   setSimulationPaused:  (v: boolean) => set({ simulationPaused: v }),
-  setGodModeUnlocked: (v: boolean) => set({ godModeUnlocked: v }),
-  setGodModePin: (pin: string) => set({ godModePin: pin }),
+
+  setGodModePin: (pin: string) => {
+    sessionStorage.setItem(STORAGE_KEY, pin)
+    set({ godModePin: pin, godModeUnlocked: true })
+  },
+
+  clearGodModePin: () => {
+    sessionStorage.removeItem(STORAGE_KEY)
+    set({ godModePin: null, godModeUnlocked: false })
+  },
 }))

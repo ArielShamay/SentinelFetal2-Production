@@ -3,7 +3,7 @@
 // Ring buffer sizes: fhrRing=2400, ucRing=2400 (10 min @ 4Hz), riskHistory=600 (60 min / 6s)
 
 import { create } from 'zustand'
-import type { BedUpdate } from '../types'
+import type { BedUpdate, EventAnnotation } from '../types'
 import { RingBuffer } from '../utils/ringBuffer'
 import { playAlertTone } from '../utils/alertSound'
 
@@ -38,6 +38,7 @@ export interface BedData {
   warmup: boolean
   sampleCount: number
   godModeActive: boolean
+  activeEvents: EventAnnotation[]   // from WebSocket, updated each BedUpdate
   riskDelta: number
   lastUpdate: number    // Unix seconds; used by useStaleDetector
 }
@@ -80,6 +81,7 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
     warmup: true,
     sampleCount: 0,
     godModeActive: false,
+    activeEvents: [],
     riskDelta: 0,
     lastUpdate: 0,
   }
@@ -113,6 +115,7 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
   bed.warmup = u.warmup
   bed.sampleCount = u.sample_count
   bed.godModeActive = u.god_mode_active
+  bed.activeEvents = u.active_events
   bed.riskDelta = u.risk_delta
   bed.lastUpdate = u.last_update_server_ts > 0
     ? u.last_update_server_ts
@@ -133,8 +136,20 @@ export const useBedStore = create<BedStore>((set) => ({
 
   updateFromWebSocket: (update: BedUpdate) => {
     set(state => {
+      const existing = state.beds.get(update.bed_id)
+      const updated = applyUpdate(existing, update)
+      // Only create a new Map if something visible to WardView changed.
+      // This prevents unnecessary re-renders when only internal ring buffers change.
+      if (existing
+          && existing.riskScore === updated.riskScore
+          && existing.alert === updated.alert
+          && existing.warmup === updated.warmup
+          && existing.sampleCount === updated.sampleCount) {
+        state.beds.set(update.bed_id, updated)
+        return state  // same reference → no re-render
+      }
       const next = new Map(state.beds)
-      next.set(update.bed_id, applyUpdate(next.get(update.bed_id), update))
+      next.set(update.bed_id, updated)
       return { beds: next }
     })
   },

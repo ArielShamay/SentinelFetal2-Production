@@ -38,15 +38,25 @@ export interface BedUpdate {
 
   // God Mode fields (always present, default-falsy)
   god_mode_active: boolean
-  active_events: unknown[]
+  active_events: EventAnnotation[]
   risk_delta: number
   last_update_server_ts: number
+}
+
+/** Single raw CTG sample emitted at 4 Hz for smooth chart rendering.
+ *  Decoupled from inference — arrives every sample regardless of inference stride. */
+export interface ChartTick {
+  bed_id: string
+  fhr: number    // BPM (denormalized)
+  uc: number     // mmHg (denormalized)
+  t: number      // elapsed_seconds — recording timeline, consistent with BedUpdate
 }
 
 export interface BatchUpdateMessage {
   type: 'batch_update'
   timestamp: number
   updates: BedUpdate[]
+  chart_ticks: ChartTick[]   // real-time samples at 4 Hz; may be empty
 }
 
 export interface InitialStateMessage {
@@ -95,12 +105,51 @@ export interface AlertHistoryResponse {
   events: AlertEventSchema[]
 }
 
-/** Annotation for a God Mode injected event on the CTG timeline (Phase 6). */
+/** Annotation for a God Mode injected event on the CTG timeline.
+ *  Mirrors Python src/god_mode/types.py EventAnnotation dataclass exactly. */
 export interface EventAnnotation {
-  bed_id: string
-  elapsed_seconds: number
+  event_id: string
   event_type: string
-  details?: Record<string, unknown>
+  start_sample: number
+  end_sample: number | null
+  still_ongoing: boolean
+  description: string
+  timeline_summary: string          // "Started 00:12:34 | Duration: 00:03:20"
+  detected_details: Record<string, number>  // {feature: overridden_value}
+}
+
+// ---------------------------------------------------------------------------
+// God Mode REST types
+// ---------------------------------------------------------------------------
+
+export interface InjectResponse {
+  event_id: string
+  status: string
+  signal_swapped: boolean
+  start_sample: number
+}
+
+export interface GodModeStatus {
+  enabled: boolean
+  signal_swap_available: boolean
+  available_event_types: string[]   // event types that have catalog entries (★)
+}
+
+export interface GodModeEventRecord {
+  event_id: string
+  bed_id: string
+  event_type: string
+  start_sample: number
+  end_sample: number | null
+  severity: number
+  description: string
+  signal_swapped: boolean
+  original_recording_id: string | null
+}
+
+export interface EndEventResponse {
+  status: string              // "ended" | "not_found"
+  recording_restored: boolean
 }
 
 /**

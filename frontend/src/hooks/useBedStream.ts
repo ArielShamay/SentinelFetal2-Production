@@ -3,7 +3,7 @@
 // Delegates transport (connect/reconnect/backoff) to wsClient singleton.
 // On each message it:
 //   1. calls updateFromWebSocket() / initializeFromSnapshot() (Zustand → WardView)
-//   2. calls chartUpdateBus.publish() (direct to CTG chart, bypassing React render — BUG-10)
+//   2. calls chartUpdateBus.publish() for each chart_tick (4 Hz raw samples, BUG-10)
 
 import { useEffect } from 'react'
 import { useBedStore } from '../stores/bedStore'
@@ -32,12 +32,13 @@ export function useBedStream(): void {
       }
 
       if (msg.type === 'batch_update') {
+        // Inference updates — risk scores, clinical features, fhrRing/ucRing population
         for (const u of msg.updates) {
-          // tStart derived from stream elapsed_seconds so chart timestamps stay
-          // monotonic at any replay speed — PLAN.md §11.2
-          const tStart = u.elapsed_seconds - u.fhr_latest.length * 0.25
           updateFromWebSocket(u)
-          chartUpdateBus.publish(u.bed_id, u.fhr_latest, u.uc_latest, tStart)
+        }
+        // Chart ticks — 4 Hz raw samples, emitted every sample independently of inference
+        for (const tick of msg.chart_ticks ?? []) {
+          chartUpdateBus.publish(tick.bed_id, [tick.fhr], [tick.uc], tick.t)
         }
       } else if (msg.type === 'initial_state') {
         initializeFromSnapshot(msg.beds)

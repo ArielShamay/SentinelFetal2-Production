@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import queue
 import time
@@ -53,9 +54,28 @@ class AsyncBroadcaster:
         push() is synchronous — NO asyncio involvement here.
         """
         try:
-            self._queue.put_nowait(dataclasses.asdict(state))
+            d = dataclasses.asdict(state)
+            d["_kind"] = "state"
+            self._queue.put_nowait(d)
         except queue.Full:
             logger.warning("Broadcaster queue full — dropping BedState for %s", state.bed_id)
+
+    def push_chart_tick(self, bed_id: str, fhr_bpm: float, uc_mmhg: float, t: float) -> None:
+        """
+        Thread-safe. Called from PipelineManager._process_and_broadcast() at 4 Hz.
+        Enqueues a single raw sample for real-time CTG chart streaming.
+        Chart tick loss is acceptable — drop silently on full queue.
+        """
+        try:
+            self._queue.put_nowait({
+                "_kind": "tick",
+                "bed_id": bed_id,
+                "fhr": fhr_bpm,
+                "uc": uc_mmhg,
+                "t": t,
+            })
+        except queue.Full:
+            pass
 
     # ── WebSocket client management ────────────────────────────────────────
 
@@ -94,26 +114,30 @@ class AsyncBroadcaster:
     async def _drain_loop(self) -> None:
         """
         Polls queue every _DRAIN_INTERVAL.
-        Drains ALL pending states and sends them as a single batch_update message
-        to all connected WebSocket clients.
-        Batching reduces per-message overhead considerably when many beds update together.
+        Separates bed_states (inference results) from chart_ticks (raw 4 Hz samples)
+        and sends both in a single batch_update message per cycle.
         """
         while self._running:
-            pending: list[dict] = []
+            bed_states: list[dict] = []
+            chart_ticks: list[dict] = []
 
             # Drain everything currently in the queue (non-blocking)
             while True:
                 try:
                     item = self._queue.get_nowait()
-                    pending.append(item)
+                    if item.pop("_kind", "state") == "tick":
+                        chart_ticks.append(item)
+                    else:
+                        bed_states.append(item)
                 except queue.Empty:
                     break
 
-            if pending and self._clients:
+            if (bed_states or chart_ticks) and self._clients:
                 msg = {
                     "type": "batch_update",
                     "timestamp": time.time(),
-                    "updates": pending,
+                    "updates": bed_states,
+                    "chart_ticks": chart_ticks,
                 }
                 await self._send_to_all(msg)
 
@@ -127,15 +151,25 @@ class AsyncBroadcaster:
                 await self._send_to_all({"type": "heartbeat", "ts": time.time()})
 
     async def _send_to_all(self, msg: dict) -> None:
-        """Send a JSON message to all connected clients. Silently remove dead connections."""
-        dead: list[str] = []
-        for client_id, ws in list(self._clients.items()):
-            try:
-                if ws.client_state == WebSocketState.CONNECTED:
-                    await ws.send_json(msg)
-            except Exception as exc:
-                logger.debug("Failed to send to client %s: %s", client_id, exc)
-                dead.append(client_id)
+        """Send a JSON message to all connected clients concurrently.
 
-        for cid in dead:
-            await self.unregister(cid)
+        Serializes JSON once, sends the same text to all clients in parallel
+        with a per-client timeout so one slow client cannot block others.
+        """
+        if not self._clients:
+            return
+        text = json.dumps(msg)
+        tasks = [
+            self._send_one(cid, ws, text)
+            for cid, ws in list(self._clients.items())
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _send_one(self, client_id: str, ws: WebSocket, text: str) -> None:
+        """Send pre-serialized text to one client with a 2-second timeout."""
+        try:
+            if ws.client_state == WebSocketState.CONNECTED:
+                await asyncio.wait_for(ws.send_text(text), timeout=2.0)
+        except Exception as exc:
+            logger.debug("Failed to send to client %s: %s", client_id, exc)
+            await self.unregister(client_id)

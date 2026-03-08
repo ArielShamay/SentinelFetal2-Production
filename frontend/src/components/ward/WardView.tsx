@@ -3,7 +3,7 @@
 // Grid columns controlled by uiStore.gridColumns.
 // Click → navigate to /bed/:id (DetailView).
 
-import React from 'react'
+import React, { useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useBedStore } from '../../stores/bedStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -21,8 +21,14 @@ export const WardView: React.FC = () => {
   const gridColumns = useUIStore(s => s.gridColumns)
   const navigate    = useNavigate()
 
-  const sorted = Array.from(beds.values()).sort(
-    (a, b) => b.riskScore - a.riskScore,
+  const sorted = useMemo(
+    () => Array.from(beds.values()).sort((a, b) => b.riskScore - a.riskScore),
+    [beds],
+  )
+
+  const handleClick = useCallback(
+    (bedId: string) => navigate(`/bed/${bedId}`),
+    [navigate],
   )
 
   const colClass = GRID_COLS[gridColumns] ?? 'grid-cols-2'
@@ -42,7 +48,7 @@ export const WardView: React.FC = () => {
         <BedCard
           key={bed.bedId}
           bed={bed}
-          onClick={() => navigate(`/bed/${bed.bedId}`)}
+          onClick={handleClick}
         />
       ))}
     </div>

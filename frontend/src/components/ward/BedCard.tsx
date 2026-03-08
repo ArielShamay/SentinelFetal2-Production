@@ -3,14 +3,15 @@
 // React.memo — only re-renders when riskScore / alert / isStale / warmup change.
 // Risk bar is a B&W gradient (light → dark = low → high risk).
 
-import React from 'react'
+import React, { useCallback } from 'react'
 import type { BedData } from '../../stores/bedStore'
 import { StatusBadge } from '../common/StatusBadge'
 import { useStaleDetector } from '../../hooks/useStaleDetector'
+import { CTGChart } from '../detail/CTGChart'
 
 interface Props {
   bed: BedData
-  onClick: () => void
+  onClick: (bedId: string) => void
 }
 
 export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
@@ -18,6 +19,8 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
 
   const riskPct   = Math.round(bed.riskScore * 100)
   const alertBorder = bed.alert ? 'border-2 border-gray-900' : 'border border-gray-200'
+
+  const handleClick = useCallback(() => onClick(bed.bedId), [onClick, bed.bedId])
 
   return (
     <button
@@ -27,7 +30,7 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
         alertBorder,
         isStale ? 'opacity-60' : '',
       ].join(' ')}
-      onClick={onClick}
+      onClick={handleClick}
     >
       {/* Header row */}
       <div className="flex items-center justify-between">
@@ -70,6 +73,11 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
       <span className="text-xs text-gray-400 font-mono">
         {bed.recordingId}
       </span>
+
+      {/* Mini CTG strip */}
+      <div className="w-full mt-1 rounded overflow-hidden">
+        <CTGChart bedId={bed.bedId} compact />
+      </div>
     </button>
   )
 })

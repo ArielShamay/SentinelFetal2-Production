@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 _WINDOW_LEN = 1800          # PatchTST input length: 7.5 min × 4 Hz
 _RING_MAXLEN = 7200         # ring buffer capacity: 30 min × 4 Hz
 _INFERENCE_STRIDE = 24      # one inference every 24 samples = 6 seconds
+_WINDOW_SCORE_MAX = 300     # cap window_scores: ~30 min of inference history
 _DEFAULT_DECISION_THRESHOLD = 0.4605492604713227   # production_config["decision_threshold"]
 _DEFAULT_BEST_AT = 0.5                             # production_config["best_at"]
 
@@ -272,8 +273,11 @@ class SentinelRealtime:
 
             if (self._sample_count % _INFERENCE_STRIDE == 0
                     and len(self._fhr_ring) >= _WINDOW_LEN):
-                fhr_win = np.array(self._fhr_ring, dtype=np.float32)[-_WINDOW_LEN:]
-                uc_win = np.array(self._uc_ring, dtype=np.float32)[-_WINDOW_LEN:]
+                # Convert deque → numpy ONCE; reuse in _compute_full_state
+                fhr_full = np.array(self._fhr_ring, dtype=np.float32)
+                uc_full = np.array(self._uc_ring, dtype=np.float32)
+                fhr_win = fhr_full[-_WINDOW_LEN:]
+                uc_win = uc_full[-_WINDOW_LEN:]
                 signal = np.stack([fhr_win, uc_win])
 
                 prob = self._run_ensemble(signal)
@@ -283,7 +287,10 @@ class SentinelRealtime:
 
                 start = max(0, self._sample_count - _WINDOW_LEN)
                 self._window_scores.append((start, prob))
-                return self._compute_full_state()
+                # Cap to prevent unbounded growth
+                if len(self._window_scores) > _WINDOW_SCORE_MAX:
+                    self._window_scores = self._window_scores[-_WINDOW_SCORE_MAX:]
+                return self._compute_full_state(fhr_full, uc_full)
 
         return None
 
@@ -300,6 +307,11 @@ class SentinelRealtime:
             self._window_scores.clear()
             self._risk_history.clear()
             self._sample_count = 0
+
+    @property
+    def bed_id(self) -> str:
+        """Public accessor for the bed identifier."""
+        return self._bed_id
 
     @property
     def current_sample_count(self) -> int:
@@ -343,11 +355,15 @@ class SentinelRealtime:
             logger.error(f"[{self._bed_id}] PatchTST ensemble failed: {exc}")
             return None
 
-    def _compute_full_state(self) -> BedState:
+    def _compute_full_state(self, fhr_arr: np.ndarray, uc_arr: np.ndarray) -> BedState:
         """Assemble 25-feature LR vector and return a BedState.
 
         Called from on_new_sample() while _state_lock is held.
         Every 24 samples after warmup.
+
+        Args:
+            fhr_arr: pre-converted numpy array from ring buffer (avoids redundant conversion)
+            uc_arr:  pre-converted numpy array from ring buffer
 
         Feature vector order (must match production_config.json feature_names):
             [0–11]  12 AI features    (extract_recording_features)
@@ -359,10 +375,6 @@ class SentinelRealtime:
             extract_clinical_features,
         )
         from src.inference.alert_extractor import extract_recording_features
-
-        # ── Snapshot current ring contents ────────────────────────────────
-        fhr_arr = np.array(self._fhr_ring, dtype=np.float32)   # (T,) normalized
-        uc_arr = np.array(self._uc_ring, dtype=np.float32)     # (T,) normalized
 
         # _window_scores already includes the current tick score from on_new_sample().
         # BUG-6: this function is called only when current inference succeeded.

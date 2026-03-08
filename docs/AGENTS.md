@@ -811,6 +811,20 @@ async def test_end_event_restores_recording(client):
     event_id = inj.json()["event_id"]
     end = await client.delete(f"/api/god-mode/events/{event_id}?bed_id=bed_01", ...)
     assert end.json().get("recording_restored") in (True, False)   # field must exist
+
+# BUG-11: overlapping events restore to TRUE baseline
+async def test_overlapping_events_restore_baseline(client):
+    # inject A → inject B → end B (no restore) → end A (restore to original)
+    a = await client.post("/api/god-mode/inject",
+        json={"bed_id": "bed_01", "event_type": "late_decelerations"}, ...)
+    b = await client.post("/api/god-mode/inject",
+        json={"bed_id": "bed_01", "event_type": "bradycardia"}, ...)
+    # End B — A still active, so no restore
+    end_b = await client.delete(f"/api/god-mode/events/{b.json()['event_id']}?bed_id=bed_01", ...)
+    assert end_b.json()["recording_restored"] == False
+    # End A — no more active events, restores to TRUE original (not B's pathological)
+    end_a = await client.delete(f"/api/god-mode/events/{a.json()['event_id']}?bed_id=bed_01", ...)
+    assert end_a.json()["recording_restored"] == True
 ```
 
 **`perf_test_16beds.py` — קריטריוני עמידה:**

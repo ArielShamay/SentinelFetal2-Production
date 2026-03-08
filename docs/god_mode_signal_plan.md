@@ -194,12 +194,13 @@ async def inject_event(req: InjectRequest, manager=Depends(get_manager), engine=
     if segment_store is not None:
         segment = segment_store.get_segment(req.event_type.value)
         if segment is not None:
-            old_id = engine.swap_recording(
+            # BUG-11: always store TRUE baseline, not current (possibly swapped) recording
+            event.original_recording_id = manager.get_baseline_recording(req.bed_id)
+            engine.swap_recording(
                 req.bed_id,
                 segment["recording_id"],
                 segment.get("best_start_sample", 0),
             )
-            event.original_recording_id = old_id
             event.signal_swapped = True
 
     # 3. Register feature override (immediate effect on risk score)
@@ -224,12 +225,15 @@ async def end_event(event_id: str, bed_id: str = Query(...), manager=Depends(get
     event = injector.get_event(bed_id, event_id)
     recording_restored = False
 
-    # 2. Restore original recording
-    if event and event.original_recording_id:
-        engine.swap_recording(bed_id, event.original_recording_id, 0)
-        recording_restored = True
-
     ok = injector.end_event(bed_id, event_id, current_sample)
+
+    # 2. BUG-11: only restore if NO other active swapped events remain
+    if event and event.original_recording_id:
+        remaining = [e for e in injector.get_events(bed_id)
+                     if e.event_id != event_id and e.signal_swapped and e.end_sample is None]
+        if not remaining:
+            engine.swap_recording(bed_id, event.original_recording_id, 0)
+            recording_restored = True
 
     return EndEventResponse(status="ended" if ok else "not_found", recording_restored=recording_restored)
 ```
@@ -265,8 +269,44 @@ async def end_event(event_id: str, bed_id: str = Query(...), manager=Depends(get
 | לא נמצאה הקלטה עם הפתולוגיה המבוקשת | feature override בלבד (fallback) — כמו התכנון המקורי |
 | קפיצה בגרף ברגע ההחלפה | מינורית — נקודת מעבר אחת שנגללת מהגרף תוך שניות |
 | אירוע נגמר אבל buffer עדיין מלא בנתונים פתולוגיים | הנתונים התקינים ממלאים את ה-buffer בהדרגה — risk_score יורד טבעית |
-| מספר אירועים על אותה מיטה | ההקלטה מוחלפת לאחרון שהוזרק; בסיום — חוזרת למקורית |
+| מספר אירועים על אותה מיטה | BUG-11 fix: `PipelineManager._baseline_recordings` שומר את ההקלטה המקורית. כל event מקבל את ה-baseline (לא chain). בסיום — שחזור רק אם אין אירועים חופפים פעילים. `clear_bed` משחזר ישירות ל-baseline |
 | הקלטה פתולוגית שבמקרה "מבריאה" באמצע | feature override מבטיח שה-risk נשאר גבוה |
+
+---
+
+## הסתייגויות עיצוב ידועות (Design Caveats)
+
+### Caveat 1 — Feature Mixing (Signal + Override)
+
+כש-signal swap פעיל, ה-feature override גם פועל. התוצאה: וקטור features היברידי — חלק מהערכים מגיעים מהאות האמיתי (ההקלטה הפתולוגית), וחלק מוזרקים ע"י ה-override.
+
+**למה זה קורה:** ה-override משנה רק תת-קבוצה קטנה של הפיצ'רים (למשל, `LATE_DECELERATIONS` משנה רק `n_late_decelerations` ו-`max_deceleration_depth_bpm`). שאר 9 הפיצ'רים מחושבים מהאות.
+
+**למה זה בסדר:**
+- ה-override דוחף פיצ'רים **באותו כיוון** שהאות הפתולוגי מייצר טבעית
+- `max()` semantics: ברגע שהאות מייצר ערך חזק יותר, ה-override הופך ל-no-op
+- ביטול ה-override בזמן swap ישבור את ה-demo: ה-override נותן **תגובה מיידית** (6s) בעוד שלאות לוקח זמן למלא את ה-buffer
+- תקופת ה-hybrid קצרה: 45s ב-10x / 7.5 דקות ב-1x
+
+**חריגים:** `BRADYCARDIA` ו-`LOW_VARIABILITY` משתמשים ב-`min()` (מורידים baseline/variability) — אלה **כן** דורסים את הערך הטבעי. אבל ההקלטה הפתולוגית שנבחרה מהקטלוג כבר מכילה baseline נמוך / variability נמוך, כך שההפרש בפועל קטן.
+
+### Caveat 2 — Transition Windows
+
+מיד אחרי swap, ה-ring buffer מכיל תמהיל של נתונים ישנים וחדשים. חלון הפיצ'רים הראשון עלול לייצר ערכים לא מייצגים.
+
+**למה זה בסדר:**
+- Ring buffer = 7200 samples (30 דקות). כמה samples חדשים כמעט לא משפיעים על אגרגציה של 30 דקות
+- תוך 1-2 חלונות (6-12 שניות) כבר נכנסים מספיק נתונים חדשים
+- Feature override ממסך כל רעש זמני ב-risk score
+- לא צפויים false negatives — רק רעש מינורי שנגלל תוך שניות
+
+### Caveat 3 — Demo Bias
+
+הדגמות God Mode מזריקות דפוסים פתולוגיים **נקיים** (מהקטלוג) לתוך הקלטות יציבות. נתוני CTG אמיתיים הם רועשים יותר: ארטיפקטים מחיישנים, תנועת אם, drift בקו בסיס, דפוסים חופפים.
+
+**השלכה:** ב-demo המודל נראה טוב יותר ממה שיהיה במציאות. אלרטים מגיעים בדיוק, risk score עולה חלק.
+
+**הקלה:** ההקלטות בקטלוג הן **הקלטות אמיתיות** (לא סינתטיות) — כך שהרעש הטבעי של ההקלטה נשמר. השלב הבא לשיפור: בחירת הקלטות בסיס רועשות יותר, או הוספת ארטיפקטים אקראיים.
 
 ---
 

@@ -266,7 +266,7 @@ class ReplayEngine:
             t_start = asyncio.get_event_loop().time()
             ticks_this_cycle = max(1, round(self._speed))
 
-            for _ in range(ticks_this_cycle):
+            for tick_i in range(ticks_this_cycle):
                 if not self._running:
                     break
                 # Snapshot: safe against concurrent add_bed / remove_bed / set_beds
@@ -276,6 +276,10 @@ class ReplayEngine:
                     # PipelineManager.on_sample submits to ThreadPoolExecutor
                     # and returns immediately — never block the event loop here.
                     self._callback(bed_id, fhr, uc)
+                # Yield to event loop between ticks so drain/heartbeat can run
+                # (prevents event loop starvation at high speed multipliers)
+                if tick_i < ticks_this_cycle - 1:
+                    await asyncio.sleep(0)
 
             self._tick_count += 1
             elapsed = asyncio.get_event_loop().time() - t_start

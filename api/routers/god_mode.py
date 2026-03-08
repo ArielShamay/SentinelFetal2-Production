@@ -107,12 +107,13 @@ async def inject_event(
     if segment_store is not None:
         segment = segment_store.get_segment(req.event_type.value)
         if segment is not None:
-            old_id = engine.swap_recording(
+            # BUG-11: always store the TRUE baseline, not the current (possibly swapped) recording
+            event.original_recording_id = manager.get_baseline_recording(req.bed_id)
+            engine.swap_recording(
                 req.bed_id,
                 segment["recording_id"],
                 segment.get("best_start_sample", 0),
             )
-            event.original_recording_id = old_id
             event.signal_swapped = True
 
     # Register feature override (immediate effect on risk score)
@@ -151,11 +152,17 @@ async def end_event(
     event = injector.get_event(bed_id, event_id)
     recording_restored = False
 
-    if event and event.original_recording_id:
-        engine.swap_recording(bed_id, event.original_recording_id, 0)
-        recording_restored = True
-
     ok = injector.end_event(bed_id, event_id, current_sample)
+
+    # BUG-11: only restore recording if NO other active swapped events remain
+    if event and event.original_recording_id:
+        remaining = [
+            e for e in injector.get_events(bed_id)
+            if e.event_id != event_id and e.signal_swapped and e.end_sample is None
+        ]
+        if not remaining:
+            engine.swap_recording(bed_id, event.original_recording_id, 0)
+            recording_restored = True
 
     audit_logger.info(
         "GOD_MODE_END | bed=%s event_id=%s recording_restored=%s",
@@ -193,16 +200,17 @@ async def list_events(
 @router.delete("/clear/{bed_id}")
 async def clear_bed(
     bed_id: str,
+    manager=Depends(get_manager),
     engine=Depends(get_engine),
 ):
     """Clear all events for a bed. Restores original recording if any were swapped."""
     removed = GodModeInjector.get().clear_bed(bed_id)
 
-    # Restore original recording from the most recent swapped event
-    for event in reversed(removed):
-        if event.original_recording_id:
-            engine.swap_recording(bed_id, event.original_recording_id, 0)
-            break
+    # BUG-11: restore directly to true baseline — not event-relative chain
+    if any(e.signal_swapped for e in removed):
+        baseline = manager.get_baseline_recording(bed_id)
+        if baseline:
+            engine.swap_recording(bed_id, baseline, 0)
 
     audit_logger.info("GOD_MODE_CLEAR | bed=%s removed=%d", bed_id, len(removed))
     return {"status": "cleared", "removed_count": len(removed)}

@@ -38,15 +38,25 @@ SentinelFetal2-Production/
 │   └── god_mode/      # Manual signal injection (dev/demo)
 ├── frontend/          # React + TypeScript ward monitoring UI
 ├── artifacts/         # Trained meta-classifier (LR + scaler)
-├── scripts/           # Utility scripts
-├── config/            # Training configuration
 ├── generator/         # CTG replay simulator
+├── data/
+│   ├── recordings/    # .npy CTG recordings (not in repo)
+│   └── god_mode_catalog.json
+├── weights/           # PatchTST fold weights (not in repo)
 └── docs/              # Architecture and planning docs
 ```
 
 ---
 
-## Setup
+## Prerequisites
+
+- Python 3.11+
+- Node.js 18+
+- A HuggingFace account with access to the private weights repo
+
+---
+
+## Setup (first time only)
 
 ### 1. Clone the repository
 
@@ -58,8 +68,11 @@ cd SentinelFetal2-Production
 ### 2. Install Python dependencies
 
 ```bash
-pip install -r requirements.txt
+python -m pip install fastapi uvicorn[standard] pydantic numpy scipy scikit-learn
+python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
+
+> For GPU support, replace the torch install URL with the appropriate CUDA version from https://pytorch.org/get-started/locally/
 
 ### 3. Download model weights
 
@@ -70,37 +83,102 @@ huggingface-cli login   # enter your HF token when prompted
 python scripts/download_weights.py
 ```
 
-This will download the 5 cross-validation fold weights into `weights/`.
+This downloads 5 cross-validation fold weights into `weights/`:
+```
+weights/fold0_best_finetune.pt
+weights/fold1_best_finetune.pt
+weights/fold2_best_finetune.pt
+weights/fold3_best_finetune.pt
+weights/fold4_best_finetune.pt
+```
 
 ### 4. Install frontend dependencies
 
 ```bash
 cd frontend
 npm install
+cd ..
 ```
 
 ---
 
-## Running
+## Running the System
 
-### Backend (FastAPI)
+Open **two terminals** from the project root.
+
+### Terminal 1 — Backend
 
 ```bash
-uvicorn api.main:app --reload --port 8000
+python -m uvicorn api.main:app --port 8000
 ```
 
-### Frontend (React)
+Expected output:
+```
+SentinelFetal2 starting up
+Loaded 5 PatchTST fold models
+SegmentStore loaded: 2479 entries across 9 event types
+SentinelFetal2 startup complete. beds=4
+Uvicorn running on http://0.0.0.0:8000
+```
+
+### Terminal 2 — Frontend
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-### CTG Simulator (replay recorded signals)
-
-```bash
-python generator/replay.py
+Expected output:
 ```
+VITE v5.4.x  ready in ~800ms
+Local:   http://localhost:5173/
+```
+
+### Start the simulation
+
+Once both servers are running, open your browser at **http://localhost:5173**.
+
+Click **"Start Simulation"** in the top bar. The system will:
+1. Assign random CTG recordings to 4 beds
+2. Begin streaming at real-time speed (1x)
+3. After ~450 seconds of warmup, risk scores start appearing
+
+> **Tip:** Click the speed control and set it to **10x** to skip warmup in ~45 seconds.
+
+---
+
+## God Mode (Demo / Teaching Tool)
+
+God Mode lets you inject pathological CTG events manually into any bed — useful for demonstrating the system's response to known patterns.
+
+1. Navigate to any bed's detail view (click a bed card)
+2. In the **God Mode** panel, enter the PIN: `1234`
+3. Select an event type (e.g. "Late Decels"), set severity and duration
+4. Click **"Inject Event"**
+
+The system swaps the bed's recording to a real pathological recording from the catalog and applies feature overrides, causing the risk score to respond immediately. Events marked with a star (★) have real recordings available for signal swap.
+
+---
+
+## API Reference
+
+The backend exposes a REST + WebSocket API at `http://localhost:8000`.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Health check |
+| `/api/beds` | GET | Current state of all beds |
+| `/api/simulation/start` | POST | Start simulation |
+| `/api/simulation/speed` | POST | Set replay speed — body: `{"speed": 10.0}` |
+| `/api/simulation/status` | GET | Simulation running/speed/beds |
+| `/api/god-mode/status` | GET | God Mode status + available event types |
+| `/api/god-mode/inject` | POST | Inject an event into a bed |
+| `/api/god-mode/events` | GET | Event history for a bed |
+| `/api/god-mode/events/{id}` | DELETE | End a specific active event |
+| `/api/god-mode/clear/{bed_id}` | DELETE | Clear all events from a bed |
+| `/ws/stream` | WebSocket | Real-time bed state stream |
+
+Interactive API docs: **http://localhost:8000/docs**
 
 ---
 
@@ -114,5 +192,5 @@ Patient data (CTG recordings and clinical labels) is **not included** in this re
 
 - **Backend:** Python, FastAPI, WebSockets
 - **Model:** PyTorch (PatchTST), scikit-learn (LR meta-classifier)
-- **Frontend:** React, TypeScript, Vite, Tailwind CSS
+- **Frontend:** React, TypeScript, Vite, Tailwind CSS, lightweight-charts
 - **Model storage:** Hugging Face Hub

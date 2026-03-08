@@ -2383,6 +2383,17 @@ def _run_ensemble(self, signal: np.ndarray) -> float | None:
 **הבעיה:** הדפוס המקורי: WebSocket → Zustand store update → component re-render → `appendSamples` נקרא ב-effect. ב-React Strict Mode (double-invoke) או כש-re-render לא קשור מפעיל את ה-effect, `series.update()` קורא עם אותם נתונים פעמיים → zigzag בגרף ו/או crash ב-lightweight-charts.  
 **תיקון:** ✅ הוכנס `ChartUpdateBus` (pub/sub singleton). `useBedStream.onmessage` קורא (1) `updateFromWebSocket()` ל-Zustand (state ל-ward view), ו-(2) `chartUpdateBus.publish()` ישירות ל-chart hook — עוקף לחלוטין את מחזור ה-render של React. `useCTGChart` עושה subscribe ל-bus ב-`useEffect` וקורא `series.update()` ישירות. ראה סקשן 5 + `utils/chartUpdateBus.ts`.
 
+#### BUG-11: God Mode — שרשור original_recording_id נשבר באירועים חופפים
+**מיקום:** `api/routers/god_mode.py` (inject_event, end_event, clear_bed) + `api/services/pipeline_manager.py`
+**הבעיה:** כשמזריקים שני אירועי God Mode על אותה מיטה ברצף, `inject_event` שומר את ה-`original_recording_id` מערך ההחזרה של `swap_recording()` — שזו ההקלטה הפתולוגית של האירוע הקודם, לא ההקלטה המקורית האמיתית. בסיום אירוע, המיטה משוחזרת להקלטה פתולוגית במקום לבסיס.
+**תיקון:** ✅ הוספת `_baseline_recordings: dict[str, str]` ב-PipelineManager — שדה שזוכר את ההקלטה המקורית של כל bed (נקבע ב-`set_beds()`). `inject_event` משתמש ב-`manager.get_baseline_recording()` במקום בערך ההחזרה של `swap_recording()`. `end_event` בודק שאין אירועים חופפים פעילים לפני שחזור. `clear_bed` משחזר ישירות ל-baseline.
+
+#### Design Caveats — God Mode (לא באגים, אלא מגבלות עיצוב מתועדות)
+ראה תיעוד מלא ב-`docs/god_mode_signal_plan.md` סקשן "הסתייגויות עיצוב ידועות":
+1. **Feature Mixing** — כש-signal swap + feature override פעילים במקביל, וקטור הפיצ'רים היברידי. בסדר כי override דוחף באותו כיוון כמו האות, ו-max() הופך אותו ל-no-op ברגע שהאות חזק מספיק.
+2. **Transition Windows** — חלון ראשון אחרי swap מכיל תמהיל ישן/חדש. בסדר כי ring buffer ארוך (30 דקות) ו-override ממסך רעש.
+3. **Demo Bias** — הדגמות נקיות יותר מנתונים קליניים אמיתיים. מוקל ע"י שימוש בהקלטות אמיתיות (לא סינתטיות).
+
 ---
 
 ### 11.2 — API חסרות: `GET /api/recordings` ו-state ראשוני
@@ -3251,3 +3262,72 @@ frontend/e2e/
 ---
 
 *תכנית זו מוכנה לביצוע. כל שלב אמאי ועצמאי — ניתן לבנות ולבדוק כל אחד לפני שממשיכים לבא.*
+
+---
+
+## שלב 7 — 4 Hz Chart Streaming (הפרדת גרף מ-Inference)
+
+**תאריך:** 2026-03-07 | **מצב:** ✅ הושלם
+
+### הבעיה
+
+גרף ה-CTG "קפא" כל ~6 שניות ואז קיבל burst של 24 נקודות בבת אחת.
+**סיבת שורש:** `_INFERENCE_STRIDE = 24` — ה-pipeline מחשב רק כל 24 דגימות (= 6 שניות ב-4 Hz).
+נתוני הגרף (fhr_latest / uc_latest) הגיעו בתוך הודעת ה-BedState, כלומר גם הם ב-6 שניות פעם.
+
+### הפתרון
+
+הפרדה מלאה בין שני זרמים:
+- **Inference stream** — BedState כל 6 שניות (ללא שינוי)
+- **Chart tick stream** — דגימה בודדת לכל מיטה ב-4 Hz, ללא תלות ב-inference
+
+### שינויי קוד
+
+**`api/services/broadcaster.py`**
+- `push()` מוסיף `"_kind": "state"` לפני הכנסה לתור
+- שיטה חדשה `push_chart_tick(bed_id, fhr_bpm, uc_mmhg, t)` — מכניסה `{"_kind": "tick", ...}` לתור (thread-safe, `queue.put_nowait`, מוריד tick אם התור מלא)
+- `_drain_loop()` מפריד queue ל-`bed_states` ו-`chart_ticks` ושולח שניהם בהודעת `batch_update` אחת
+
+**`api/services/pipeline_manager.py`**
+- `_process_and_broadcast()` — לפני בדיקת `if state is None: return`, תמיד פולט chart tick:
+  ```python
+  t = pipeline.current_sample_count / 4.0
+  fhr_bpm = round(fhr_norm * 160.0 + 50.0, 1)
+  uc_mmhg = round(uc_norm * 100.0, 1)
+  self._broadcaster.push_chart_tick(pipeline.bed_id, fhr_bpm, uc_mmhg, t)
+  ```
+
+**`frontend/src/types/index.ts`**
+- ממשק חדש `ChartTick { bed_id, fhr, uc, t }`
+- `BatchUpdateMessage` מכיל `chart_ticks: ChartTick[]`
+
+**`frontend/src/hooks/useBedStream.ts`**
+- הוסרה השליחה הישנה של גרף דרך `fhr_latest`/`uc_latest`
+- נוספה לולאה על `msg.chart_ticks` שמפרסמת כל tick ל-`chartUpdateBus`
+
+---
+
+## שלב 8 — Chart History Buffer (כל המיטות מוקלטות תמיד)
+
+**תאריך:** 2026-03-07 | **מצב:** ✅ הושלם
+
+### הבעיה
+
+`chartUpdateBus` היה pub/sub פשוט ללא זיכרון — רק המנוי הפעיל קיבל נתונים.
+כשהמשתמש צופה ב-DetailView של מיטה אחת, שאר המיטות לא היה להן מנוי — נתוני הגרף שלהן אבדו.
+כשפתחו מיטה אחרת מאוחר יותר — הגרף התחיל מאפס.
+
+### הפתרון
+
+**`frontend/src/utils/chartUpdateBus.ts`** — כתיבה מחדש מלאה עם ring buffer לכל מיטה:
+
+- `MAX_BUFFER = 4800` — 20 דקות × 4 Hz ≈ 115 KB סה"כ ל-4 מיטות
+- `publish()` — תמיד שומר בבאפר, ללא קשר למנוי
+- `subscribe()` — מיד מנגן מחדש את כל ההיסטוריה בתור קריאה אחת לcallback, אחר כך ממשיך עם ticks חיים
+- Ring buffer מגביל ל-MAX_BUFFER (שומר הכי חדש), מונע דליפת זיכרון
+
+### תוצאה
+
+- פותחים כל מיטה בכל עת → גרף מציג מיד היסטוריה מלאה
+- כל 4 המיטות מוקלטות תמיד ברקע
+- אין שינויים ב-`useCTGChart.ts` — הוא כבר תומך במערכים באורך משתנה

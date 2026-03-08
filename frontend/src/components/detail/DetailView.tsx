@@ -5,17 +5,21 @@
 import React from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useBedStore } from '../../stores/bedStore'
+import { useUIStore } from '../../stores/uiStore'
 import { useStaleDetector } from '../../hooks/useStaleDetector'
 import { StatusBadge } from '../common/StatusBadge'
 import { RiskGauge } from './RiskGauge'
 import { FindingsPanel } from './FindingsPanel'
 import { AlertHistory } from './AlertHistory'
 import { CTGChart } from './CTGChart'
+import { GodModePanel } from '../god-mode/GodModePanel'
+import { EventJournal } from '../god-mode/EventJournal'
 
 export const DetailView: React.FC = () => {
   const { id } = useParams<{ id: string }>()
-  const bed     = useBedStore(s => id ? s.beds.get(id) : undefined)
-  const isStale = useStaleDetector(bed?.lastUpdate ?? 0)
+  const bed        = useBedStore(s => id ? s.beds.get(id) : undefined)
+  const isStale    = useStaleDetector(bed?.lastUpdate ?? 0)
+  const godModePin = useUIStore(s => s.godModePin)
 
   if (!bed) {
     return (
@@ -58,14 +62,20 @@ export const DetailView: React.FC = () => {
         />
       </div>
 
-      {/* CTG chart */}
-      <CTGChart bedId={bed.bedId} />
+      {/* God Mode panel */}
+      <GodModePanel bedId={bed.bedId} />
+
+      {/* CTG chart — activeEvents drive timeline markers, baselineBpm draws reference line */}
+      <CTGChart bedId={bed.bedId} activeEvents={bed.activeEvents} baselineBpm={bed.baselineBpm} />
 
       {/* Lower panels */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <FindingsPanel bed={bed} />
         <AlertHistory bedId={bed.bedId} />
       </div>
+
+      {/* Event journal — visible only after PIN unlock */}
+      <EventJournal bedId={bed.bedId} pin={godModePin} />
     </div>
   )
 }

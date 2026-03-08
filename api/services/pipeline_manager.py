@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import random
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -64,8 +65,11 @@ class PipelineManager:
 
         # Limit CPU saturation: max 4 concurrent PatchTST inference threads (§9)
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sentinel-inf")
+        # Backpressure: track pending tasks per bed to prevent unbounded queue growth
+        self._pending: dict[str, int] = defaultdict(int)
 
         self._god_mode_enabled: bool = False
+        self._baseline_recordings: dict[str, str] = {}   # bed_id → original recording_id (BUG-11)
 
         # God Mode segment store — loaded if catalog exists
         self._segment_store = None
@@ -115,6 +119,14 @@ class PipelineManager:
                         pass  # Phase 4 not yet available — silently disabled
         audit_logger.info("GOD_MODE_ENABLED | system-wide")
 
+    def get_baseline_recording(self, bed_id: str) -> str | None:
+        """Return the original recording_id assigned to a bed (BUG-11).
+
+        Used by God Mode to always restore to the true baseline, even after
+        multiple overlapping signal swaps.
+        """
+        return self._baseline_recordings.get(bed_id)
+
     # ── Bed management ─────────────────────────────────────────────────────
 
     def set_beds(self, bed_configs: list[dict], engine) -> None:
@@ -157,6 +169,8 @@ class PipelineManager:
             self._pipelines = new_pipelines
             # Clear last states so initial_state doesn't send stale data
             self._last_states = {}
+            # BUG-11: remember original recording per bed for God Mode restore
+            self._baseline_recordings = {c["bed_id"]: c["recording_id"] for c in resolved}
 
         logger.info("Beds configured: %s", [c["bed_id"] for c in resolved])
 
@@ -183,11 +197,30 @@ class PipelineManager:
         Called by ReplayEngine at 4 Hz from the async event loop thread.
         Non-blocking: submits inference work to ThreadPoolExecutor and returns immediately.
         PatchTST inference (~50ms) runs off the event loop (BUG-8 prevention).
+        Backpressure: at extreme speed (20× with 16 beds), cap per-bed pending
+        tasks to prevent unbounded memory growth while still allowing enough
+        throughput for warmup and inference to complete.
         """
         pipeline = self._pipelines.get(bed_id)
         if pipeline is None:
             return
-        self._executor.submit(self._process_and_broadcast, pipeline, fhr_norm, uc_norm)
+        if self._pending[bed_id] >= 50:
+            return  # backpressure — extreme load protection only
+        self._pending[bed_id] += 1
+        self._executor.submit(self._process_and_broadcast_wrapped, bed_id, pipeline, fhr_norm, uc_norm)
+
+    def _process_and_broadcast_wrapped(
+        self,
+        bed_id: str,
+        pipeline: "SentinelRealtime",
+        fhr_norm: float,
+        uc_norm: float,
+    ) -> None:
+        """Wrapper that decrements pending counter after processing."""
+        try:
+            self._process_and_broadcast(pipeline, fhr_norm, uc_norm)
+        finally:
+            self._pending[bed_id] -= 1
 
     def _process_and_broadcast(
         self,
@@ -201,7 +234,17 @@ class PipelineManager:
         push() is sync and thread-safe (queue.put_nowait) — no asyncio bridge needed.
         """
         try:
+            # Chart tick is pushed BEFORE on_new_sample() so that PatchTST inference
+            # (which runs every _INFERENCE_STRIDE samples and takes ~200ms) cannot delay
+            # the 4 Hz chart stream. t is pre-computed as (count+1)/4.0 to match the
+            # post-increment sample index that on_new_sample() will assign.
+            fhr_bpm = round(fhr_norm * 160.0 + 50.0, 1)
+            uc_mmhg = round(uc_norm * 100.0, 1)
+            t = (pipeline.current_sample_count + 1) / 4.0
+            self._broadcaster.push_chart_tick(pipeline.bed_id, fhr_bpm, uc_mmhg, t)
+
             state = pipeline.on_new_sample(fhr_norm, uc_norm)
+
             if state is None:
                 return
 
