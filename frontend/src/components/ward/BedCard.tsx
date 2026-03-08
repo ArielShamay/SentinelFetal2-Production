@@ -18,7 +18,7 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
   const isStale = useStaleDetector(bed.lastUpdate)
 
   const riskPct   = Math.round(bed.riskScore * 100)
-  const alertBorder = bed.alert ? 'border-2 border-gray-900' : 'border border-gray-200'
+  const alertBorder = bed.alert ? 'border-2 border-red-400' : 'border border-gray-200'
 
   const handleClick = useCallback(() => onClick(bed.bedId), [onClick, bed.bedId])
 
@@ -49,7 +49,7 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
       <div className="flex items-baseline gap-1.5">
         <span className={[
           'text-2xl font-bold tabular-nums',
-          bed.alert ? 'text-gray-900' : 'text-gray-700',
+          bed.alert ? 'text-red-600' : 'text-gray-700',
         ].join(' ')}>
           {riskPct}%
         </span>
@@ -62,7 +62,9 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
           className="h-full rounded transition-all duration-500"
           style={{
             width: `${riskPct}%`,
-            background: `linear-gradient(90deg, #d1d5db 0%, #374151 60%, #111827 100%)`,
+            background: bed.alert
+              ? `linear-gradient(90deg, #fca5a5 0%, #ef4444 60%, #b91c1c 100%)`
+              : `linear-gradient(90deg, #d1d5db 0%, #374151 60%, #111827 100%)`,
             backgroundSize: '200% 100%',
             backgroundPosition: `${100 - riskPct}% center`,
           }}

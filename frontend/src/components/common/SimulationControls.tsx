@@ -3,7 +3,7 @@
 // State is sourced from uiStore (reconciled from backend) rather than local state,
 // so it stays accurate after failed requests or external changes.
 
-import React, { useCallback, useEffect } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { useUIStore } from '../../stores/uiStore'
 import type { SimulationStatus } from '../../types'
 
@@ -23,10 +23,11 @@ async function apiPost(path: string, body?: unknown): Promise<boolean> {
 }
 
 export const SimulationControls: React.FC = () => {
-  const running  = useUIStore(s => s.simulationRunning)
-  const paused   = useUIStore(s => s.simulationPaused)
+  const running    = useUIStore(s => s.simulationRunning)
+  const paused     = useUIStore(s => s.simulationPaused)
   const setRunning = useUIStore(s => s.setSimulationRunning)
   const setPaused  = useUIStore(s => s.setSimulationPaused)
+  const [bedCount, setBedCount] = useState(2)
 
   // Reconcile UI state with backend
   const refreshStatus = useCallback(async () => {
@@ -43,7 +44,11 @@ export const SimulationControls: React.FC = () => {
   useEffect(() => { void refreshStatus() }, [refreshStatus])
 
   async function handleStart() {
-    await apiPost('/api/simulation/start')
+    const beds = Array.from({ length: bedCount }, (_, i) => ({
+      bed_id: `bed_${String(i + 1).padStart(2, '0')}`,
+      recording_id: null,
+    }))
+    await apiPost('/api/simulation/start', { beds })
     await refreshStatus()
   }
 
@@ -67,6 +72,19 @@ export const SimulationControls: React.FC = () => {
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
+      {!running && (
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500">Beds:</span>
+          <input
+            type="number"
+            min={1}
+            max={16}
+            value={bedCount}
+            onChange={e => setBedCount(Math.min(16, Math.max(1, Number(e.target.value))))}
+            className="w-12 text-sm border border-gray-300 rounded px-1 py-0.5 text-center"
+          />
+        </div>
+      )}
       <button className={btnBase} onClick={handleStart} disabled={running && !paused}>
         ▶ Start
       </button>

@@ -66,15 +66,38 @@ function GridSelector() {
 export const App: React.FC = () => {
   useBedStream()
 
+  const selectedBedId    = useUIStore(s => s.selectedBedId)
+  const setSelectedBedId = useUIStore(s => s.setSelectedBedId)
+
   return (
     <div className="flex flex-col h-full">
       <ConnectionLostBanner />
+
+      {/* Bed detail modal — WardView stays mounted so all mini charts keep streaming */}
+      {selectedBedId && (
+        <div
+          className="fixed inset-0 z-40 bg-black/40 flex items-center justify-center"
+          onClick={() => setSelectedBedId(null)}
+        >
+          <div
+            className="relative bg-white rounded-xl shadow-2xl w-[92vw] max-w-5xl max-h-[92vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setSelectedBedId(null)}
+              className="absolute top-3 right-3 text-gray-400 hover:text-gray-700 text-xl leading-none z-10"
+              aria-label="Close"
+            >×</button>
+            <DetailView bedId={selectedBedId} onClose={() => setSelectedBedId(null)} />
+          </div>
+        </div>
+      )}
+
       <AppHeader />
       <GridSelector />
       <main className="flex-1 overflow-auto">
         <Routes>
-          <Route path="/"        element={<WardView />} />
-          <Route path="/bed/:id" element={<DetailView />} />
+          <Route path="/" element={<WardView />} />
         </Routes>
       </main>
     </div>

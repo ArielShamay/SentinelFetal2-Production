@@ -24,7 +24,7 @@ export const RiskGauge: React.FC<Props> = ({ riskScore, riskDelta, alert }) => {
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline gap-2">
-        <span className={['text-4xl font-bold tabular-nums', alert ? 'text-gray-900' : 'text-gray-700'].join(' ')}>
+        <span className={['text-4xl font-bold tabular-nums', alert ? 'text-red-600' : 'text-gray-700'].join(' ')}>
           {pct}%
         </span>
         <span className="text-lg"><DeltaArrow delta={riskDelta} /></span>
@@ -37,7 +37,9 @@ export const RiskGauge: React.FC<Props> = ({ riskScore, riskDelta, alert }) => {
           className="h-full rounded transition-all duration-500"
           style={{
             width: `${pct}%`,
-            background: 'linear-gradient(90deg, #d1d5db 0%, #374151 60%, #111827 100%)',
+            background: alert
+              ? 'linear-gradient(90deg, #fca5a5 0%, #ef4444 60%, #b91c1c 100%)'
+              : 'linear-gradient(90deg, #d1d5db 0%, #374151 60%, #111827 100%)',
             backgroundSize: '200% 100%',
             backgroundPosition: `${100 - pct}% center`,
           }}

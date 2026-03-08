@@ -8,7 +8,7 @@ export type BadgeVariant = 'live' | 'stale' | 'alert' | 'warmup' | 'disconnected
 const STYLES: Record<BadgeVariant, string> = {
   live:         'bg-gray-900 text-white',
   stale:        'bg-gray-300 text-gray-700',
-  alert:        'bg-gray-900 text-white font-bold',
+  alert:        'bg-red-500 text-white font-bold',
   warmup:       'bg-gray-200 text-gray-600',
   disconnected: 'bg-gray-200 text-gray-500',
 }

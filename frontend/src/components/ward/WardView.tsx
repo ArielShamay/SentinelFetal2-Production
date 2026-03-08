@@ -4,7 +4,6 @@
 // Click → navigate to /bed/:id (DetailView).
 
 import React, { useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useBedStore } from '../../stores/bedStore'
 import { useUIStore } from '../../stores/uiStore'
 import { BedCard } from './BedCard'
@@ -17,9 +16,9 @@ const GRID_COLS: Record<number, string> = {
 }
 
 export const WardView: React.FC = () => {
-  const beds        = useBedStore(s => s.beds)
-  const gridColumns = useUIStore(s => s.gridColumns)
-  const navigate    = useNavigate()
+  const beds             = useBedStore(s => s.beds)
+  const gridColumns      = useUIStore(s => s.gridColumns)
+  const setSelectedBedId = useUIStore(s => s.setSelectedBedId)
 
   const sorted = useMemo(
     () => Array.from(beds.values()).sort((a, b) => b.riskScore - a.riskScore),
@@ -27,8 +26,8 @@ export const WardView: React.FC = () => {
   )
 
   const handleClick = useCallback(
-    (bedId: string) => navigate(`/bed/${bedId}`),
-    [navigate],
+    (bedId: string) => setSelectedBedId(bedId),
+    [setSelectedBedId],
   )
 
   const colClass = GRID_COLS[gridColumns] ?? 'grid-cols-2'
