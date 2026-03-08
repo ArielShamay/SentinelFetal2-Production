@@ -196,6 +196,7 @@ class SentinelRealtime:
         scaler: Any | None = None,           # StandardScaler, 25 features
         lr_model: Any | None = None,         # LogisticRegression
         god_mode: bool = False,              # enable God Mode for this bed
+        inference_offset: int = 0,           # stagger offset within _INFERENCE_STRIDE
     ) -> None:
         self._bed_id = bed_id
         self._recording_id = recording_id
@@ -212,6 +213,11 @@ class SentinelRealtime:
         self._models = models
         self._scaler = scaler
         self._lr = lr_model
+
+        # ── Inference stagger — spreads N beds across one stride window ───
+        # bed i fires inference when (count - offset) % stride == 0, so
+        # beds 0..N-1 fire 1 sample apart instead of all at once.
+        self._inference_offset: int = inference_offset % _INFERENCE_STRIDE
 
         # ── Ring buffers: normalized [0,1] values ─────────────────────────
         self._fhr_ring: deque = deque(maxlen=_RING_MAXLEN)
@@ -271,7 +277,7 @@ class SentinelRealtime:
             self._uc_ring.append(uc_norm)
             self._sample_count += 1
 
-            if (self._sample_count % _INFERENCE_STRIDE == 0
+            if ((self._sample_count - self._inference_offset) % _INFERENCE_STRIDE == 0
                     and len(self._fhr_ring) >= _WINDOW_LEN):
                 # Convert deque → numpy ONCE; reuse in _compute_full_state
                 fhr_full = np.array(self._fhr_ring, dtype=np.float32)

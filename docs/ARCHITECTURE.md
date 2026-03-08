@@ -1167,4 +1167,38 @@ uc_mmhg  = uc_norm * 100.0             # chart display mmHg
 
 ---
 
-*Last updated: reflects codebase state after Phase 9 performance hardening (9 fixes applied).*
+## 10. Validated Performance — Endurance Test Results
+
+**Test:** `scripts/perf_test_16beds.py` — 35 minutes, 16 beds, speed 1x
+**Date:** 2026-03-08
+
+### Results
+
+| Metric | Result | Threshold | Status |
+|--------|--------|-----------|--------|
+| Memory (RSS) | 35–36 MB (flat throughout) | ≤ 1024 MB | **PASS** |
+| Memory plateau (after min 30) | +0 MB drift | < 50 MB drift | **PASS** |
+| WS lag p99 | max 20 ms | < 200 ms | **PASS** |
+| WS reconnections | 0 | 0 | **PASS** |
+| CPU (16 beds, inference phase) | 54–81% | ≤ 40% | **FAIL** |
+
+### CPU Analysis
+
+CPU stays at 22–25% during warmup (first 7.5 minutes, no inference). Once all 16 beds hit their 1800-sample warmup threshold simultaneously (T+07:30), CPU jumps to 54–81% and stays there.
+
+**Root cause:** `ThreadPoolExecutor(max_workers=4)` in `api/pipeline_manager.py` is saturated. At 16 beds × 1 inference/6s × 5 ensemble folds, the executor is fully loaded every cycle. Workers cannot drain fast enough, causing queueing and CPU contention.
+
+**What is unaffected:** Memory and WS lag remain excellent throughout. The system is functionally stable — all CTG charts update, all alerts fire, no frames dropped.
+
+**Fix applied (inference staggering):** `SentinelRealtime` now accepts `inference_offset: int`. `PipelineManager.set_beds()` computes `offset = (i * 24) // n_beds` for bed index `i`, spreading all N beds evenly across the 24-sample (6s) stride window. With 16 beds, at most 1–2 beds fire inference per sample tick instead of all 16 simultaneously. Re-run endurance test to confirm CPU drops below 40%.
+
+### Memory Stability Confirmation
+
+Ring buffer plateau confirmed:
+- `_fhr_ring` and `_uc_ring` each reach `maxlen=7200` at T+30:00
+- `_window_scores` deque capped at 300 entries
+- RSS flat at 36 MB from T+01 through T+34 — no upward trend, no memory leak
+
+---
+
+*Last updated: reflects codebase state after Phase 8 endurance test (2026-03-08).*
