@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 _WINDOW_LEN = 1800          # PatchTST input length: 7.5 min × 4 Hz
 _RING_MAXLEN = 7200         # ring buffer capacity: 30 min × 4 Hz
-_INFERENCE_STRIDE = 24      # one inference every 24 samples = 6 seconds
+_INFERENCE_STRIDE = 40      # one inference every 40 samples = 10 seconds
 _WINDOW_SCORE_MAX = 300     # cap window_scores: ~30 min of inference history
 _DEFAULT_DECISION_THRESHOLD = 0.4605492604713227   # production_config["decision_threshold"]
 _DEFAULT_BEST_AT = 0.5                             # production_config["best_at"]

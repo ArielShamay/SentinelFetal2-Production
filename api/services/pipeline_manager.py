@@ -63,10 +63,10 @@ class PipelineManager:
         self._last_states: dict[str, "BedState"] = {}
         self._lock = threading.Lock()
 
-        # Limit CPU saturation: max 4 concurrent PatchTST inference threads (§9).
+        # 8 workers: enough headroom for 16 beds × 1 inference/10s without queueing.
         # Per-bed inference_offset in set_beds() staggers firing so beds don't
         # all run inference on the same sample tick (§10 CPU stagger fix).
-        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sentinel-inf")
+        self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sentinel-inf")
         # Backpressure: track pending tasks per bed to prevent unbounded queue growth
         self._pending: dict[str, int] = defaultdict(int)
 
@@ -151,7 +151,7 @@ class PipelineManager:
 
         from src.inference.pipeline import SentinelRealtime
 
-        _INFERENCE_STRIDE = 24  # must match pipeline.py constant
+        _INFERENCE_STRIDE = 40  # must match pipeline.py constant
         n_beds = len(resolved)
         new_pipelines: dict[str, SentinelRealtime] = {}
         for i, cfg in enumerate(resolved):
