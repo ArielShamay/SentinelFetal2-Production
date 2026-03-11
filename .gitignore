@@ -1,9 +1,4 @@
-# Patient data - never commit
-data/
-
-# Large model weight files
-weights/
-
+# Claude session files
 # Claude session files
 .claude/
 
