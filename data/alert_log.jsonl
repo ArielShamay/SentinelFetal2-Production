@@ -740,3 +740,4 @@
 {"bed_id": "bed_14", "timestamp": 1773330839.1961334, "risk_score": 0.3836971245471906, "alert_on": false, "elapsed_s": 1018.0}
 {"bed_id": "bed_14", "timestamp": 1773330857.966103, "risk_score": 0.4828354321700835, "alert_on": true, "elapsed_s": 1048.0}
 {"bed_id": "bed_14", "timestamp": 1773330864.3005505, "risk_score": 0.40021826099371255, "alert_on": false, "elapsed_s": 1058.0}
+{"bed_id": "bed_14", "timestamp": 1773330921.9316335, "risk_score": 0.48897218079177374, "alert_on": true, "elapsed_s": 1148.0}
