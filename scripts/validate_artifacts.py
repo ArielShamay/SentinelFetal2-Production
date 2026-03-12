@@ -155,7 +155,7 @@ def main() -> None:
     if args.validate_recordings:
         validate_recordings_dir(args.recordings_dir)
 
-    print("\n✓ All artifacts valid.\n")
+    print("\n[OK] All artifacts valid.\n")
 
 
 if __name__ == "__main__":

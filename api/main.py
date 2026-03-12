@@ -74,6 +74,7 @@ async def lifespan(app: FastAPI):
         beds={},
         recordings_dir=Path(settings.recordings_dir),
         callback=manager.on_sample,
+        speed=settings.default_replay_speed,
     )
 
     # ── Step 7: Fail-fast if recordings are missing ───────────────────────
