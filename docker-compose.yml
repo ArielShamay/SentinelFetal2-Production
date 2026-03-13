@@ -8,7 +8,6 @@ services:
       - ./weights:/app/weights
       - ./logs:/app/logs
     environment:
-      - GOD_MODE_PIN=${GOD_MODE_PIN:-change_me}
       - GOD_MODE_ENABLED=${GOD_MODE_ENABLED:-false}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - 'CORS_ORIGINS=["http://localhost","http://localhost:80"]'

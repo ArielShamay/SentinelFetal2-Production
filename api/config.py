@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     max_beds: int = 16
 
     # ── God Mode ──────────────────────────────────────────────────────────
-    god_mode_pin: str = "1234"          # override: GOD_MODE_PIN=xxxx
     god_mode_enabled: bool = False      # override: GOD_MODE_ENABLED=true
 
     # ── CORS ──────────────────────────────────────────────────────────────

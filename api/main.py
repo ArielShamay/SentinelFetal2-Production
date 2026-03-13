@@ -142,10 +142,6 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # ── God Mode middleware — PIN auth for /api/god-mode/* ──────────────────
-    from api.middleware.god_mode_guard import GodModeGuard
-    app.add_middleware(GodModeGuard, pin=settings.god_mode_pin)
-
     # ── Routers ────────────────────────────────────────────────────────────
     from api.routers import beds, god_mode, recordings, simulation, system, websocket
 
