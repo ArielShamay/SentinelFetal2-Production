@@ -21,6 +21,10 @@ venv/
 .venv/
 env/
 
+# Tzohar checks
+project_audit/
+DockerBuildLogs.md
+
 # Jupyter
 .ipynb_checkpoints/
 
