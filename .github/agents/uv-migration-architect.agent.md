@@ -43,6 +43,8 @@ Use this agent as the orchestration entrypoint for migration-only workflows:
 - Migration execution rules: `.github/instructions/uv-migration.instructions.md`
 - Docker safety rules: `.github/instructions/docker-uv-cpu-torch.instructions.md`
 - Dependency bucketing rules: `.github/instructions/dependency-classification.instructions.md`
+- Start-state baseline reference: `.github/skills/uv-migration-checklist/references/start-state-baseline.md`
+- Names-only resolution reference: `.github/skills/uv-migration-checklist/references/package-names-only-resolution.md`
 - Prompt template (when needed): `.github/prompts/uv-migration-execution.prompt.md`
 - Final checklist: `.github/skills/uv-migration-checklist/`
 
@@ -70,11 +72,13 @@ Interpretation order:
    - If still on default branch: stop and report blocked until dedicated branch is created and selected.
    - Do one baseline read of `/.github/UV_MIGRATION_PACK.md` and mapped core migration files before stage 1 planning.
 1. **Inventory**
+   - Capture start-state baseline evidence using `.github/skills/uv-migration-checklist/references/start-state-baseline.md`.
    - Map install/run commands in docs and scripts.
    - Extract imported top-level modules from runtime code (`api/`, runtime `src/` paths, required scripts).
 2. **Design target model**
    - Draft runtime/dev/optional dependency buckets.
    - Define Python version bounds as the newest safe legal minor and choose index strategy (especially for PyTorch).
+   - If requirements versions are untrusted, run names-only resolution using `.github/skills/uv-migration-checklist/references/package-names-only-resolution.md`.
 3. **Apply migration**
    - Introduce or update `pyproject.toml`.
    - Resolve and commit `uv.lock`.

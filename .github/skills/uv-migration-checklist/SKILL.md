@@ -15,15 +15,17 @@ Use this skill when a task asks to:
 
 ## Core workflow
 0. Ensure migration runs on a dedicated non-default branch.
-1. Read and map current install/run/docs flows.
-2. Build dependency buckets: runtime, dev, optional.
-3. Encode dependencies in `pyproject.toml`.
-4. Generate and verify `uv.lock`.
-5. Update Docker path to uv-native sync and CPU-safe torch strategy.
-6. Update docs and deprecate legacy requirements workflow.
-7. Verify reproducibility and startup behavior in a virtual environment.
-8. Maintain migration working notes in real time (progress, blockers, decisions, user interactions).
-9. Maintain fine-grained execution log entries for both small and major actions.
+1. Capture start-state baseline using `references/start-state-baseline.md`.
+2. Read and map current install/run/docs flows.
+3. Build dependency buckets: runtime, dev, optional.
+4. For legacy requirements input, use names-only resolution flow from `references/package-names-only-resolution.md`.
+5. Encode dependencies in `pyproject.toml`.
+6. Generate and verify `uv.lock`.
+7. Update Docker path to uv-native sync and CPU-safe torch strategy.
+8. Update docs and deprecate legacy requirements workflow.
+9. Verify reproducibility and startup behavior in a virtual environment.
+10. Maintain migration working notes in real time (progress, blockers, decisions, user interactions).
+11. Maintain fine-grained execution log entries for both small and major actions.
 
 ## SentinelFetal2-specific checks
 - `api.main:app` still starts correctly.
@@ -44,3 +46,7 @@ Final reporting should include:
 
 ## Dependency bucketing guidance
 Use `references/dependency-bucketing.md` before finalizing dependency tables.
+
+## Start-state and names-only guidance
+- Use `references/start-state-baseline.md` to define and capture the current migration input state before edits.
+- Use `references/package-names-only-resolution.md` when requirements versions are not trusted and only package names should seed resolution.

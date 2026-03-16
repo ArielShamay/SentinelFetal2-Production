@@ -39,3 +39,12 @@ A migration is complete only if all checks pass:
 9. **Auditability**
    - Migration report documents changed files, decisions, verification steps, and open risks.
    - Run documentation includes fine-grained chronological entries for small and major actions (what/why/when/context/outcome).
+
+10. **Start-state baseline completeness**
+   - A pre-edit baseline was captured (dependency inputs, command map, runtime/import surface, Python/index context, baseline health).
+   - Baseline evidence is attached to migration notes and referenced by later decisions.
+
+11. **Names-only resolution evidence (when requirements versions are untrusted)**
+   - Version pins from `requirements*.txt` were not treated as authoritative.
+   - Resolution path from package names only is documented with command evidence and rationale.
+   - Final `requires-python` and lock decisions are backed by legal/fresh resolution outcomes, not historical version pins.

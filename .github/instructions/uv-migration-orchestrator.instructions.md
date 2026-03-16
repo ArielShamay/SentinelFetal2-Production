@@ -38,6 +38,14 @@ It is not a general long-term policy for unrelated repository tasks.
 - Reusable execution prompt: `.github/prompts/uv-migration-execution.prompt.md`
 - Final checklist skill: `.github/skills/uv-migration-checklist/SKILL.md`
 
+## Stage-specific required references
+- Stage 1 (current-state baseline):
+  - `.github/skills/uv-migration-checklist/references/start-state-baseline.md`
+- Stage 3 (newest safe legal + names-only resolution path):
+  - `.github/skills/uv-migration-checklist/references/package-names-only-resolution.md`
+
+These references are mandatory for migration planning and must be explicitly consulted before applying dependency edits.
+
 ## Prompt/skill behavior rule
 If a dedicated prompt file or skill applies to the current task/subtask, stop and inspect it before acting.
 If it cannot be read/accessed, explicitly report that and continue using this orchestrator + core migration rules only.

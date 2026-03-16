@@ -22,6 +22,8 @@ This pack provides a complete customization bundle for running a safe, reproduci
   - Skill with migration checks, reporting expectations, and references:
     - `references/acceptance-criteria.md`
     - `references/dependency-bucketing.md`
+    - `references/start-state-baseline.md`
+    - `references/package-names-only-resolution.md`
 - `.github/migration-notes/`
   - Real-time working notes for run documentation/traceability, maintained during execution and used as primary reporting source.
   - Includes fine-grained execution logging (not only major milestones).
@@ -56,6 +58,16 @@ Authoritative layering for migration:
 4. custom agent/prompt/skill execution overlays
 
 The pack is intentionally designed to run **without operational dependency on `AGENTS.md`**.
+
+## Mandatory references for stage 1 (current-state baseline)
+- `references/start-state-baseline.md`
+  - Canonical checklist for the exact migration starting state to capture before edits.
+  - Defines required evidence fields (inputs, runtime entrypoints, import inventory, Python/index context, and baseline health).
+
+## Mandatory references for names-only dependency migration
+- `references/package-names-only-resolution.md`
+  - Canonical workflow for ignoring version pins in `requirements*.txt` and resolving legal/fresh combinations from package names only.
+  - Includes uv command patterns for Python candidate probing, names-only import, universal lock resolution, and lock/sync verification.
 
 ## Non-goals
 

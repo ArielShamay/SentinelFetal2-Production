@@ -1,6 +1,6 @@
 ---
 description: 'End-to-end migration rules from pip/requirements to uv/pyproject for SentinelFetal2.'
-applyTo: '**/*.py,**/*.toml,**/Dockerfile,docker-compose.yml,requirements.txt,README.md,docs/**/*.md,scripts/**/*.py,api/**/*.py,src/**/*.py'
+applyTo: '**/*.py,**/*.toml,**/Dockerfile,docker-compose.yml,requirements*.txt,README.md,docs/**/*.md,scripts/**/*.py,api/**/*.py,src/**/*.py'
 ---
 
 # UV migration execution rules
@@ -19,17 +19,37 @@ Migrate the repository from legacy pip/requirements-based dependency management 
 0. Verify branch isolation before edits:
   - Migration must run on a dedicated non-default branch.
   - If current branch is the default branch, stop and report blocked until branch isolation is fixed.
-1. Audit dependency usage in code and scripts.
-2. Classify dependencies into:
+1. Capture the migration start-state baseline (required evidence).
+2. Audit dependency usage in code and scripts.
+3. Classify dependencies into:
    - runtime (`[project.dependencies]`)
    - development (`[dependency-groups]`, typically `dev`, `test`, `lint`)
    - optional feature sets (`[project.optional-dependencies]`) only when justified
-3. Use `requirements.txt` only to derive package inventory; do not treat its versions as authoritative.
-4. Select the Python baseline as the newest safe legal minor version supported by the runtime stack and deployment constraints.
-5. Import legacy requirements conservatively (as constraints), then normalize with `uv add`.
-6. Create/update `uv.lock` and verify sync behavior.
-7. Update Docker and documentation to uv-native commands.
-8. Keep behavior parity with existing API and inference paths.
+4. Use `requirements*.txt` only to derive package inventory; do not treat versions there as authoritative.
+5. Select the Python baseline as the newest safe legal minor version supported by runtime and deployment constraints.
+6. Run names-only dependency resolution flow with uv to obtain legal + fresh combinations.
+7. Create/update `uv.lock` and verify sync behavior.
+8. Update Docker and documentation to uv-native commands.
+9. Keep behavior parity with existing API and inference paths.
+
+## Stage 1 baseline reference (required)
+- Follow: `.github/skills/uv-migration-checklist/references/start-state-baseline.md`
+- Minimum evidence to capture before dependency edits:
+  - dependency input files and their role,
+  - install/run/doc command map,
+  - runtime entrypoints and script-critical imports,
+  - Python discovery context and constraints,
+  - index/source context,
+  - baseline health checks.
+
+Do not start dependency edits until baseline evidence is captured.
+
+## Names-only resolution policy (required)
+- Follow: `.github/skills/uv-migration-checklist/references/package-names-only-resolution.md`
+- Treat version specifiers from `requirements*.txt` as non-authoritative migration input.
+- Build dependency candidates from package names only, then resolve with uv.
+- Prefer uv project locking (`uv lock`) for final authority; use `uv pip compile --universal` as a probe tool when evaluating Python compatibility candidates.
+- Dockerfile Python tags are downstream artifacts and must not be treated as dependency authority.
 
 ## Virtual-environment-only migration verification
 - Perform lock resolution, install/sync, smoke tests, imports, artifact checks, and runtime verification only in a virtual environment.
@@ -66,6 +86,10 @@ Migrate the repository from legacy pip/requirements-based dependency management 
 - Ensure selected versions are globally resolvable (including transitive constraints), not just locally "working".
 - Prefer uv resolver defaults that maximize compatible freshness; add targeted constraints only when required by evidence.
 - Any forced downgrade or pin must include rationale in migration notes.
+- When deriving from names-only inputs, use explicit evidence for:
+  - selected Python baseline candidate,
+  - chosen `requires-python` range,
+  - legal/freshness trade-offs.
 
 ## Verification gates (must pass before completion)
 - Dependency resolution succeeds and lockfile is up to date.

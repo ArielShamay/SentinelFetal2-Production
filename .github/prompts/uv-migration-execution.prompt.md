@@ -11,6 +11,8 @@ Before acting, inspect relevant migration resources:
 - `.github/instructions/docker-uv-cpu-torch.instructions.md`
 - `.github/instructions/dependency-classification.instructions.md`
 - `.github/skills/uv-migration-checklist/SKILL.md`
+- `.github/skills/uv-migration-checklist/references/start-state-baseline.md`
+- `.github/skills/uv-migration-checklist/references/package-names-only-resolution.md`
 
 ## Required outcome
 - Canonical dependency management: `pyproject.toml` + `uv.lock`.
@@ -27,12 +29,13 @@ Before acting, inspect relevant migration resources:
 - Migration work must run on a dedicated non-default branch.
 
 ## Work plan
-1. Audit imports and install instructions.
-2. Build runtime/dev/optional dependency mapping.
-3. Select Python baseline by compatibility evidence (not historical assumption).
-4. Apply pyproject + lockfile migration.
-5. Update Docker and docs.
-6. Run validation gates and summarize deltas.
+1. Capture full migration start-state baseline.
+2. Audit imports and install instructions.
+3. Build runtime/dev/optional dependency mapping.
+4. Resolve Python baseline and dependencies using names-only requirements input when versions are untrusted.
+5. Apply pyproject + lockfile migration.
+6. Update Docker and docs.
+7. Run validation gates and summarize deltas.
 
 ## Validation gates
 - Lockfile is present and current.
