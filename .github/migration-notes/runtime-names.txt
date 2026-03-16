@@ -1,0 +1,15 @@
+dash
+dash-bootstrap-components
+fastapi
+numpy
+pandas
+plotly
+psutil
+pydantic
+pydantic-settings
+pyyaml
+scikit-learn
+scipy
+torch
+uvicorn[standard]
+websockets
