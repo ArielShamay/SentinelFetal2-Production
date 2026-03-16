@@ -509,10 +509,10 @@ RUN pip install *.whl
 │                                                           │
 │  ┌────────────────────┐    ┌──────────────────────────┐  │
 │  │  backend           │    │  frontend                │  │
-│  │  python:3.11-slim  │    │  node:20 → nginx:alpine  │  │
+│  │  python:3.12-slim  │    │  node:20 → nginx:alpine  │  │
 │  │  port 8000         │◄───│  port 80                 │  │
 │  │                    │    │  (proxy → backend)       │  │
-│  │  FastAPI + uvicorn │    └──────────────────────────┘  │
+│  │  uv + FastAPI      │    └──────────────────────────┘  │
 │  │  PatchTST (torch)  │                                  │
 │  │  WebSocket stream  │                                  │
 │  └────────────────────┘                                  │
@@ -528,27 +528,28 @@ RUN pip install *.whl
 ### Dockerfile (Backend)
 
 ```dockerfile
-FROM python:3.11-slim AS backend
+FROM python:3.12-slim AS backend
 WORKDIR /app
 
 # שכבה 1: ספריות (משתנות לעיתים רחוקות)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 
 # שכבה 2: קוד (משתנה לעיתים קרובות)
 COPY . .
 
 # ולידציה בשלב הבנייה — נכשל מוקדם אם artifacts חסרים
-RUN python scripts/validate_artifacts.py
+RUN uv run --frozen python scripts/validate_artifacts.py
 
 EXPOSE 8000
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uv", "run", "--frozen", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
 ```
 
-**למה `python:3.11-slim` ולא `python:3.11`?**
+**למה `python:3.12-slim` ולא `python:3.12`?**
 - `slim` = גרסה מינימלית ללא כלי build מיותרים
 - גודל: ~50MB במקום ~900MB
-- PyTorch מותקן דרך pip ולא צריך build tools
+- תלויות נסנכרנות דטרמיניסטית דרך `uv.lock`
 
 **למה `--workers 1`?**
 - PipelineManager שומר state בזיכרון (ring buffers, קונטיינרי מיטות)
@@ -595,7 +596,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - 'CORS_ORIGINS=["http://localhost","http://localhost:80"]'
     healthcheck:
-      test: ["CMD", "python", "-c",
+      test: ["CMD", "uv", "run", "--frozen", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 30s
       timeout: 10s

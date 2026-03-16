@@ -1,0 +1,49 @@
+[project]
+name = "sentinelfetal2-production"
+version = "2.0.0"
+description = "SentinelFetal2 production backend and simulation stack"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic",
+  "pydantic-settings",
+  "numpy<2",
+  "pandas",
+  "scikit-learn==1.6.1",
+  "scipy",
+  "pyyaml",
+  "torch==2.2.2",
+  "websockets",
+  "psutil",
+  "huggingface-hub",
+]
+
+[project.optional-dependencies]
+legacy-ui = [
+  "dash",
+  "dash-bootstrap-components",
+  "plotly",
+]
+perf = [
+  "requests",
+]
+
+[dependency-groups]
+dev = []
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

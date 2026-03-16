@@ -50,7 +50,8 @@ SentinelFetal2-Production/
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.12
+- uv (https://docs.astral.sh/uv/)
 - Node.js 18+
 - A HuggingFace account with access to the private weights repo
 
@@ -65,14 +66,13 @@ git clone https://github.com/ArielShamay/SentinelFetal2-Production.git
 cd SentinelFetal2-Production
 ```
 
-### 2. Install Python dependencies
+### 2. Install Python dependencies (uv-native)
 
 ```bash
-pip install -r requirements.txt
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv sync --locked
 ```
 
-> For GPU support, replace the torch install URL with the appropriate CUDA version from https://pytorch.org/get-started/locally/
+> The project is configured for **CPU-first PyTorch resolution** via uv sources/index metadata.
 
 ### 3. Download model weights
 
@@ -80,7 +80,7 @@ Weights are stored on Hugging Face (private repo). You need a HuggingFace accoun
 
 ```bash
 huggingface-cli login   # enter your HF token when prompted
-python scripts/download_weights.py
+uv run --locked python scripts/download_weights.py
 ```
 
 This downloads 5 cross-validation fold weights into `weights/`:
@@ -109,7 +109,7 @@ Open **two terminals** from the project root.
 ### Terminal 1 — Backend
 
 ```bash
-python -m uvicorn api.main:app --port 8000
+uv run --locked uvicorn api.main:app --port 8000
 ```
 
 Wait for:
@@ -148,7 +148,7 @@ Local:   http://localhost:5173/
 - Click **⏹ Stop** in the top bar.
 
 **Shut down the backend**:
-- Press `Ctrl+C` in Terminal 1 (uvicorn).
+- Press `Ctrl+C` in Terminal 1 (uv run + uvicorn).
 
 **Shut down the frontend**:
 - Press `Ctrl+C` in Terminal 2 (Vite).
