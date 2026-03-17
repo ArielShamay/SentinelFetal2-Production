@@ -519,6 +519,37 @@ RUN pip install *.whl
   - `dev` = backend image + frontend dev image
   - `prod-like` = backend image + frontend prod image
 
+בנוסף, לכל mode יש Compose project name נפרד, כדי שמעבר בין `just dev` ל-`just prod` לא יעשה reuse ל-image הלא נכון.
+
+### שכבת הפעלה קצרה עם `just`
+
+במקום לזכור פקודות `docker compose` ארוכות, הריפו מספק:
+
+- `setup` ברוט של הריפו
+- `justfile` עם ה-recipes
+- `.tools/just` בתור binary מקומי לריפו
+- wrapper לוקאלי בשם `./just`, בלי שינוי `PATH`
+
+זרימה מומלצת:
+
+```bash
+./setup just
+./just dev
+./just dev-build
+./just dev-down
+./just prod
+./just prod-build
+./just prod-down
+```
+
+המשמעות:
+- `./just dev` = `docker compose up`
+- `./just dev-build` = `docker compose up --build`
+- `./just prod` = `docker compose -f docker-compose.prod.yml up -d`
+- `./just prod-build` = `docker compose -f docker-compose.prod.yml up --build -d`
+
+ה-wrapper תמיד מפעיל את ה-`just` המקומי של הריפו, בלי לגעת ב-`PATH` הגלובלי.
+
 ```
 ┌────────────── dev: docker-compose.yml ──────────────┐
 │ backend: uvicorn --reload + bind mounts            │
@@ -730,9 +761,21 @@ server {
 
 ## 12. הרצת הפרויקט מאפס
 
+אם אתה מחפש מדריך כניסה מלא לכל מסלולי ההפעלה של הפרויקט, כולל הרצה לוקאלית רגילה וגם Docker, ראה את [docs/getting_started.md](/Users/tzoharlary/Documents/Projects/SentinelFetal2-Production/docs/getting_started.md). הקטע כאן נשאר ממוקד במסלולי Docker בלבד.
+
 ### דרישות מוקדמות
 - Docker Desktop מותקן
 - Git מותקן
+
+### שכבת `just` האופציונלית
+
+אם אתה רוצה עטיפה קצרה יותר לפקודות Docker:
+
+```bash
+./setup just
+```
+
+זה יוריד את `just` לתוך `.tools/just` ויאפשר להשתמש ב-`./just ...` מתוך הריפו, בלי לגעת ב-`PATH` הגלובלי.
 
 ### מסלול פיתוח
 
@@ -741,6 +784,13 @@ git clone https://github.com/ArielShamay/SentinelFetal2-Production.git
 cd SentinelFetal2-Production
 
 docker compose up --build
+```
+
+או:
+
+```bash
+./setup just
+./just dev-build
 ```
 
 כתובות:
@@ -758,6 +808,13 @@ cd SentinelFetal2-Production
 docker compose -f docker-compose.prod.yml up --build -d
 ```
 
+או:
+
+```bash
+./setup just
+./just prod-build
+```
+
 כתובות:
 - `http://localhost` → frontend דרך nginx
 - `http://localhost:8000` → backend API
@@ -769,6 +826,13 @@ docker compose -f docker-compose.prod.yml up --build -d
 ```bash
 docker compose down
 docker compose -f docker-compose.prod.yml down
+```
+
+או:
+
+```bash
+./just dev-down
+./just prod-down
 ```
 
 ### עדכון קוד
