@@ -24,6 +24,7 @@ env/
 # Tzohar checks
 project_audit/
 DockerBuildLogs.md
+migration-agent-debug-log.json
 
 # Jupyter
 .ipynb_checkpoints/
