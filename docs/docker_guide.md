@@ -504,25 +504,33 @@ RUN pip install *.whl
 
 ### מבט על
 
+הפרויקט עבר למבנה של שני מסלולי Docker ברורים:
+
+- `docker-compose.yml` הוא מסלול **פיתוח**: backend עם `uvicorn --reload`, frontend עם Vite על פורט `5173`, ו-bind mounts לקוד כדי לראות שינויים מיד.
+- `docker-compose.prod.yml` הוא מסלול **prod-like**: backend self-contained, frontend דרך nginx על פורט `80`, וללא bind mounts של קוד, recordings או weights.
+
+**מודל מנטלי קצר:**
+- יש תמיד **2 services**: `backend` ו-`frontend`
+- יש **3 image definitions**:
+  - backend מ-`Dockerfile`
+  - frontend dev מ-`frontend/Dockerfile.dev`
+  - frontend prod מ-`frontend/Dockerfile.frontend`
+- יש **2 מצבי הרצה**:
+  - `dev` = backend image + frontend dev image
+  - `prod-like` = backend image + frontend prod image
+
 ```
-┌─────────────────── docker-compose.yml ───────────────────┐
-│                                                           │
-│  ┌────────────────────┐    ┌──────────────────────────┐  │
-│  │  backend           │    │  frontend                │  │
-│  │  python:3.12-slim  │    │  node:20 → nginx:alpine  │  │
-│  │  port 8000         │◄───│  port 80                 │  │
-│  │                    │    │  (proxy → backend)       │  │
-│  │  uv + FastAPI      │    └──────────────────────────┘  │
-│  │  PatchTST (torch)  │                                  │
-│  │  WebSocket stream  │                                  │
-│  └────────────────────┘                                  │
-│          │  volumes                                       │
-│    ┌─────┴──────────────────────────┐                    │
-│    │  ./data    → /app/data         │                    │
-│    │  ./weights → /app/weights      │                    │
-│    │  ./logs    → /app/logs         │                    │
-│    └────────────────────────────────┘                    │
-└───────────────────────────────────────────────────────────┘
+┌────────────── dev: docker-compose.yml ──────────────┐
+│ backend: uvicorn --reload + bind mounts            │
+│ frontend: Vite dev server (5173)                   │
+│ קוד מקומי → משתקף מיד בתוך הקונטיינרים            │
+└─────────────────────────────────────────────────────┘
+
+┌────────── prod-like: docker-compose.prod.yml ───────┐
+│ backend: image self-contained                       │
+│ frontend: nginx serving dist/                       │
+│ named volume רק ל-logs                              │
+└─────────────────────────────────────────────────────┘
 ```
 
 ### Dockerfile (Backend)
@@ -531,77 +539,146 @@ RUN pip install *.whl
 FROM python:3.12-slim AS backend
 WORKDIR /app
 
-# שכבה 1: ספריות (משתנות לעיתים רחוקות)
-RUN pip install --no-cache-dir uv
+ARG UV_VERSION=0.9.7
+RUN pip install --no-cache-dir "uv==$UV_VERSION"
+
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
-# שכבה 2: קוד (משתנה לעיתים קרובות)
-COPY . .
+RUN mkdir -p data/recordings logs
 
-# ולידציה בשלב הבנייה — נכשל מוקדם אם artifacts חסרים
+# רק משטח הריצה של ה-backend נכנס ל-image
+COPY api ./api
+COPY src ./src
+COPY generator ./generator
+COPY scripts ./scripts
+COPY config ./config
+COPY artifacts ./artifacts
+COPY weights ./weights
+COPY data/god_mode_catalog.json ./data/god_mode_catalog.json
+COPY data/recordings ./data/recordings
+
 RUN uv run --frozen python scripts/validate_artifacts.py
 
 EXPOSE 8000
 CMD ["uv", "run", "--frozen", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
 ```
 
-**למה `python:3.12-slim` ולא `python:3.12`?**
-- `slim` = גרסה מינימלית ללא כלי build מיותרים
-- גודל: ~50MB במקום ~900MB
-- תלויות נסנכרנות דטרמיניסטית דרך `uv.lock`
+**למה זה חשוב?**
+- `uv` מותקן בגרסה נעולה (`0.9.7`), כדי שה-build לא ישתנה בעתיד רק בגלל שיצאה גרסה חדשה של הכלי.
+- אנחנו כבר לא עושים `COPY . .`, ולכן frontend, docs וקבצי פיתוח לא נכנסים ל-backend image.
+- יש ולידציה בבנייה, כך שחסר ב-`artifacts/` או `weights/` מפיל את ה-build מוקדם.
 
 **למה `--workers 1`?**
-- PipelineManager שומר state בזיכרון (ring buffers, קונטיינרי מיטות)
-- עם workers > 1 כל process היה ממופה לזיכרון נפרד — מיטות לא היו מסונכרנות
-- פתרון: worker יחיד + async event loop
+- `PipelineManager` שומר state בזיכרון.
+- יותר מ-worker אחד היה יוצר state נפרד לכל process.
+- לכן backend runtime נשאר single-process בכוונה.
 
-### frontend/Dockerfile.frontend (Multi-Stage)
+### frontend/Dockerfile.dev
 
 ```dockerfile
-# שלב 1: Build — node:20 עם כל הספריות
+FROM node:20-slim
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+EXPOSE 5173
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+```
+
+זה image לפיתוח בלבד:
+- מריץ את Vite dev server
+- עובד עם bind mount של `./frontend`
+- מתאים ל-hot reload
+
+### frontend/Dockerfile.frontend
+
+```dockerfile
 FROM node:20-slim AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci                   # התקנה מדויקת מ-package-lock.json
+RUN npm ci
 COPY . .
-RUN npm run build            # Vite מייצר dist/
+RUN npm run build
 
-# שלב 2: Production — nginx קטן
 FROM nginx:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
 ```
 
-**תוצאה:**
-- שלב build: ~800MB (node + כל הספריות)
-- image סופי: ~25MB (nginx + קבצים סטטיים בלבד)
+זה image לפריסה:
+- שלב build נפרד עם Node
+- runtime קטן עם nginx בלבד
+- הפרונט נבנה פעם אחת ומוגש כקבצים סטטיים
 
-### docker-compose.yml שלנו
+### docker-compose.yml שלנו (פיתוח)
 
 ```yaml
 services:
   backend:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uv", "run", "--frozen", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data        # הקלטות ה-.npy ו-alert_log
-      - ./weights:/app/weights  # משקולות PatchTST
-      - ./logs:/app/logs        # לוגים נשמרים על המחשב
+      - ./api:/app/api
+      - ./src:/app/src
+      - ./generator:/app/generator
+      - ./scripts:/app/scripts
+      - ./config:/app/config
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+      - ./weights:/app/weights
+      - ./logs:/app/logs
     environment:
-      - GOD_MODE_PIN=${GOD_MODE_PIN:-change_me}
+      - GOD_MODE_ENABLED=${GOD_MODE_ENABLED:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - WATCHFILES_FORCE_POLLING=true
+      - 'CORS_ORIGINS=["http://localhost:5173","http://localhost:3000","http://localhost:80"]'
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - VITE_PROXY_TARGET=http://backend:8000
+      - VITE_WS_PROXY_TARGET=ws://backend:8000
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+```
+
+**למה זה נכון לפיתוח?**
+- backend רואה שינויים בקוד דרך bind mounts
+- frontend רץ ב-Vite ולכן יש reload מהיר
+- ה-proxy של Vite מצביע ל-`backend:8000` בתוך הרשת של compose, לא ל-`localhost`
+
+### docker-compose.prod.yml שלנו (prod-like)
+
+```yaml
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    volumes:
+      - backend_logs:/app/logs
+    environment:
       - GOD_MODE_ENABLED=${GOD_MODE_ENABLED:-false}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - 'CORS_ORIGINS=["http://localhost","http://localhost:80"]'
-    healthcheck:
-      test: ["CMD", "uv", "run", "--frozen", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s         # מאפשר לPatchTST להיטען (~5s)
 
   frontend:
     build:
@@ -609,15 +686,19 @@ services:
       dockerfile: Dockerfile.frontend
     ports:
       - "80:80"
+    restart: unless-stopped
     depends_on:
       backend:
-        condition: service_healthy  # מחכה ל-backend להיות healthy
+        condition: service_healthy
+
+volumes:
+  backend_logs:
 ```
 
-**למה volumes ל-data ו-weights?**
-הם גדולים (~86MB) ומשתנים לעיתים רחוקות. שמירתם כ-bind mounts על המחשב:
-- מאפשר עדכון הקלטות/משקולות ללא rebuild
-- שומר על alert_log.jsonl בין הפעלות
+**למה זה נכון להרצה יציבה יותר?**
+- ה-backend image מכיל את כל runtime surface שהוא צריך.
+- אין תלות בתיקיות מקומיות בשביל קוד, recordings או weights.
+- רק `logs` נשמרים ב-named volume כדי לא לאבד אותם בין הפעלות.
 
 ### nginx.conf שלנו
 
@@ -625,12 +706,10 @@ services:
 server {
     listen 80;
 
-    # כל קריאה ל-/api/ → backend
     location /api/ {
         proxy_pass http://backend:8000;
     }
 
-    # WebSocket stream
     location /ws/ {
         proxy_pass http://backend:8000;
         proxy_http_version 1.1;
@@ -638,7 +717,6 @@ server {
         proxy_set_header Connection "upgrade";
     }
 
-    # כל שאר → React app
     location / {
         root /usr/share/nginx/html;
         try_files $uri $uri/ /index.html;
@@ -646,7 +724,7 @@ server {
 }
 ```
 
-`http://backend:8000` עובד כי ב-docker network, שם השירות (`backend`) הוא ה-hostname.
+`backend` הוא hostname חוקי בתוך רשת ה-compose.
 
 ---
 
@@ -656,60 +734,56 @@ server {
 - Docker Desktop מותקן
 - Git מותקן
 
-### צעדים
+### מסלול פיתוח
 
 ```bash
-# 1. שכפול הפרויקט
 git clone https://github.com/ArielShamay/SentinelFetal2-Production.git
 cd SentinelFetal2-Production
 
-# 2. הגדרת משתני סביבה (אופציונלי)
-cp .env.example .env
-# ערוך .env אם רוצה לשנות GOD_MODE_PIN וכו'
-
-# 3. בנייה והפעלה
-docker-compose up --build
-
-# 4. המתן לhealthcheck לעבור (~60 שניות — טעינת מודלים)
-# תראה: backend | SentinelFetal2 startup complete. beds=4
-
-# 5. פתח בדפדפן
-# http://localhost       ← frontend (דרך nginx)
-# http://localhost:8000  ← backend API ישירות
+docker compose up --build
 ```
 
-### הפעלה בפעמים הבאות (ללא rebuild)
+כתובות:
+- `http://localhost:5173` → frontend דרך Vite
+- `http://localhost:8000` → backend API
+
+זה המסלול הנכון כשאתה עובד על הקוד ורוצה לראות שינויים בזמן אמת.
+
+### מסלול prod-like
+
 ```bash
-docker-compose up
+git clone https://github.com/ArielShamay/SentinelFetal2-Production.git
+cd SentinelFetal2-Production
+
+docker compose -f docker-compose.prod.yml up --build -d
 ```
+
+כתובות:
+- `http://localhost` → frontend דרך nginx
+- `http://localhost:8000` → backend API
+
+זה המסלול הנכון כשאתה רוצה לבדוק image דומה יותר לפריסה אמיתית.
 
 ### עצירה
-```bash
-# עצירה שומרת נתונים (volumes)
-docker-compose down
 
-# עצירה ומחיקת הכל כולל logs ו-data
-docker-compose down -v
+```bash
+docker compose down
+docker compose -f docker-compose.prod.yml down
 ```
 
-### שינוי מספר מיטות
-```bash
-# ב-docker-compose.yml תחת backend environment:
-DEFAULT_BED_COUNT=8
+### עדכון קוד
 
-# או בזמן ריצה:
-curl -X POST http://localhost:8000/api/simulation/start \
-  -H "Content-Type: application/json" \
-  -d '{"beds": [{"bed_id":"bed1"},{"bed_id":"bed2"},...]}'
+במסלול הפיתוח:
+
+```bash
+docker compose up --build backend
+docker compose up --build frontend
 ```
 
-### עדכון קוד ללא rebuild מלא
-```bash
-# רק backend השתנה
-docker-compose up --build backend
+במסלול prod-like:
 
-# רק frontend השתנה
-docker-compose up --build frontend
+```bash
+docker compose -f docker-compose.prod.yml up --build -d
 ```
 
 ---
@@ -717,49 +791,70 @@ docker-compose up --build frontend
 ## 13. פתרון בעיות נפוצות
 
 ### backend לא עולה
+
 ```bash
-docker-compose logs backend
+docker compose logs backend
+docker compose -f docker-compose.prod.yml logs backend
 ```
+
 סיבות נפוצות:
-- `artifacts/` חסר → validate_artifacts.py נכשל בשלב build
-- `weights/` חסר → load_production_models נכשל
-- פורט 8000 תפוס → שנה ל-`"8001:8000"` ב-compose
+- `artifacts/` חסר → `validate_artifacts.py` מפיל את ה-build
+- `weights/` חסר → טעינת המודלים נכשלת
+- פורט `8000` תפוס → שנה את מיפוי הפורטים ב-compose
 
 ### frontend לא מתחבר ל-backend
-```bash
-docker-compose logs frontend
-```
-ודא שב-nginx.conf:
-```nginx
-proxy_pass http://backend:8000;  # ← שם השירות ב-compose, לא localhost
-```
+
+במסלול הפיתוח:
+- ודא ש-`VITE_PROXY_TARGET=http://backend:8000`
+- ודא שה-frontend וה-backend יושבים באותו compose network
+
+במסלול prod-like:
+- ודא שב-`nginx.conf` ה-proxy מכוון ל-`http://backend:8000`
 
 ### שינויים בקוד לא נראים
-Build חדש דרוש:
+
+אם אתה רוצה hot reload, השתמש רק במסלול הפיתוח:
+
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
-או אם רוצה שינויים בזמן אמת בפיתוח — השתמש ב-bind mount:
-```yaml
-volumes:
-  - ./api:/app/api        # קוד backend ישר מהמחשב
+
+אם אתה במסלול prod-like, כל שינוי קוד דורש rebuild:
+
+```bash
+docker compose -f docker-compose.prod.yml up --build -d
 ```
 
 ### image גדול מדי
+
 ```bash
-docker images | sort -k7 -h
-# בדוק מה גדול, השתמש ב-multi-stage ו-.dockerignore
+docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}"
 ```
+
+בדוק:
+- האם `.dockerignore` מוציא קבצים לא רלוונטיים
+- האם backend Dockerfile עדיין מעתיק רק את runtime surface
+- האם weights ו-recordings באמת צריכים להיות בתוך ה-image שאתה בונה
 
 ### בדיקת healthcheck
+
 ```bash
-docker inspect sentinelfetal2-backend | grep -A 10 Health
+docker inspect sentinelfetal2-production-backend-1 | grep -A 10 Health
 ```
 
+השם המדויק יכול להשתנות לפי שם הפרויקט/הספרייה.
+
 ### כניסה לקונטיינר לדיבאג
+
 ```bash
-docker-compose exec backend bash
-# עכשיו אתה בתוך הקונטיינר
+docker compose exec backend bash
+# או במסלול prod-like:
+docker compose -f docker-compose.prod.yml exec backend bash
+```
+
+פקודות שימושיות:
+
+```bash
 python -c "import torch; print(torch.__version__)"
 ls data/recordings/ | wc -l
 ```

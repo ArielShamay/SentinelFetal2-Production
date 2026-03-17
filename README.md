@@ -40,9 +40,9 @@ SentinelFetal2-Production/
 ├── artifacts/         # Trained meta-classifier (LR + scaler)
 ├── generator/         # CTG replay simulator
 ├── data/
-│   ├── recordings/    # .npy CTG recordings (not in repo)
+│   ├── recordings/    # Demo .npy CTG recordings for local runs
 │   └── god_mode_catalog.json
-├── weights/           # PatchTST fold weights (not in repo)
+├── weights/           # PatchTST fold weights for local inference
 └── docs/              # Architecture and planning docs
 ```
 
@@ -53,7 +53,7 @@ SentinelFetal2-Production/
 - Python 3.12
 - uv (https://docs.astral.sh/uv/)
 - Node.js 18+
-- A HuggingFace account with access to the private weights repo
+- Docker Desktop (optional, for containerized workflows)
 
 ---
 
@@ -74,25 +74,9 @@ uv sync --locked
 
 > The project is configured for **CPU-first PyTorch resolution** via uv sources/index metadata.
 
-### 3. Download model weights
+The production artifacts, fold weights, and demo recordings required for a local run are already included in the repository.
 
-Weights are stored on Hugging Face (private repo). You need a HuggingFace account with access.
-
-```bash
-huggingface-cli login   # enter your HF token when prompted
-uv run --locked python scripts/download_weights.py
-```
-
-This downloads 5 cross-validation fold weights into `weights/`:
-```
-weights/fold0_best_finetune.pt
-weights/fold1_best_finetune.pt
-weights/fold2_best_finetune.pt
-weights/fold3_best_finetune.pt
-weights/fold4_best_finetune.pt
-```
-
-### 4. Install frontend dependencies
+### 3. Install frontend dependencies
 
 ```bash
 cd frontend
@@ -102,7 +86,7 @@ cd ..
 
 ---
 
-## Running the System
+## Running the System Locally
 
 Open **two terminals** from the project root.
 
@@ -159,6 +143,61 @@ Click any bed card — a **floating modal** opens over the ward showing the full
 
 ---
 
+## Docker Workflows
+
+The repository now ships with two containerized workflows:
+
+- `docker-compose.yml` is the **development stack**. It runs the backend with `uvicorn --reload`, runs the frontend with the Vite dev server on port `5173`, and bind-mounts the working tree for live code edits.
+- `docker-compose.prod.yml` is the **prod-like stack**. It uses the self-contained backend image, serves the frontend through nginx on port `80`, and keeps only logs on a named Docker volume.
+
+### Docker Mental Model
+
+- There are always **two services**: `backend` and `frontend`.
+- There are **three image definitions**:
+  - one backend image from `Dockerfile`
+  - one frontend dev image from `frontend/Dockerfile.dev`
+  - one frontend prod image from `frontend/Dockerfile.frontend`
+- There are **two run modes**:
+  - `dev` uses the backend image plus the frontend dev image
+  - `prod-like` uses the backend image plus the frontend prod image
+
+The backend image is shared by both modes because the backend runtime stays the same application. The frontend uses two different images because development uses the Vite dev server, while prod-like uses a prebuilt static site served by nginx.
+
+### Development stack
+
+```bash
+docker compose up --build
+```
+
+Endpoints:
+
+- Frontend: **http://localhost:5173**
+- Backend API: **http://localhost:8000**
+
+Use this stack when you want hot reload and fast local iteration.
+
+### Prod-like stack
+
+```bash
+docker compose -f docker-compose.prod.yml up --build -d
+```
+
+Endpoints:
+
+- Frontend: **http://localhost**
+- Backend API: **http://localhost:8000**
+
+Use this stack when you want a reproducible deployment-style run. The backend image pins `uv==0.9.7`, copies only the backend runtime surface into the image, and does not rely on host bind mounts for code, recordings, or weights.
+
+### Stopping the Docker stacks
+
+```bash
+docker compose down
+docker compose -f docker-compose.prod.yml down
+```
+
+---
+
 ## God Mode (Demo / Teaching Tool)
 
 God Mode lets you inject pathological CTG events manually into any bed — useful for demonstrating the system's response to known patterns.
@@ -196,7 +235,9 @@ Interactive API docs: **http://localhost:8000/docs**
 
 ## Data
 
-Patient data (CTG recordings and clinical labels) is **not included** in this repository for privacy reasons. The system was trained on the CTU-UHB Intrapartum CTG Database.
+The repository already includes the production artifacts, fold weights, and demo `.npy` recordings required for local runs.
+
+The full original CTU-UHB dataset and sensitive clinical labels are **not included** in this repository.
 
 ---
 
@@ -205,4 +246,4 @@ Patient data (CTG recordings and clinical labels) is **not included** in this re
 - **Backend:** Python, FastAPI, WebSockets
 - **Model:** PyTorch (PatchTST), scikit-learn (LR meta-classifier)
 - **Frontend:** React, TypeScript, Vite, Tailwind CSS, lightweight-charts
-- **Model storage:** Hugging Face Hub
+- **Model assets:** repository-tracked `artifacts/` and `weights/`

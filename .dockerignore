@@ -1,6 +1,8 @@
 .git
+.github/
 .gitignore
 .venv
+.vscode/
 __pycache__/
 *.pyc
 *.pyo
@@ -8,6 +10,16 @@ __pycache__/
 *.log
 logs/
 node_modules/
-frontend/node_modules/
 .env
 .DS_Store
+docs/
+frontend/
+project_audit/
+ui/
+vscode-run-command-check/
+DockerBuildLogs.md
+migration-agent-debug-log.json
+problems.md
+data/alert_log.jsonl
+data/ctu_uhb_clinical_full.csv
+data/notes_log.jsonl

@@ -1,0 +1,41 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    volumes:
+      - backend_logs:/app/logs
+    environment:
+      - GOD_MODE_ENABLED=${GOD_MODE_ENABLED:-false}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - 'CORS_ORIGINS=["http://localhost","http://localhost:80"]'
+    healthcheck:
+      test:
+        - "CMD"
+        - "uv"
+        - "run"
+        - "--frozen"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  backend_logs:
