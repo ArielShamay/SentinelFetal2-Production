@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     # ── Server ────────────────────────────────────────────────────────────
     host: str = "0.0.0.0"
     port: int = 8000
-    debug: bool = False
 
     # ── Paths ─────────────────────────────────────────────────────────────
     recordings_dir: Path = Path("data/recordings")
