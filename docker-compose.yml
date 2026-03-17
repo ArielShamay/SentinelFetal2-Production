@@ -1,3 +1,5 @@
+name: sentinelfetal2-dev
+
 services:
   backend:
     build:

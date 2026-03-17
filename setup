@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+  LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+  case "$LINK_TARGET" in
+    /*) SCRIPT_PATH="$LINK_TARGET" ;;
+    *) SCRIPT_PATH="$SCRIPT_DIR/$LINK_TARGET" ;;
+  esac
+done
+
+REPO_ROOT="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
+TOOLS_DIR="$REPO_ROOT/.tools"
+INSTALLER_URL="https://just.systems/install.sh"
+JUST_VERSION="${JUST_VERSION:-1.47.1}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./setup just
+
+Supported tools:
+  just    Install the repository-local just binary into .tools/just.
+          This setup does not modify PATH or create global wrappers.
+EOF
+}
+
+say() {
+  printf 'setup: %s\n' "$*"
+}
+
+fail() {
+  printf 'setup: error: %s\n' "$*" >&2
+  exit 1
+}
+
+detect_platform() {
+  case "$(uname -s)" in
+    Darwin)
+      printf 'mac'
+      ;;
+    Linux)
+      if grep -qi microsoft /proc/version 2>/dev/null || grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+        printf 'windows-wsl'
+      else
+        printf 'linux'
+      fi
+      ;;
+    *)
+      printf 'unsupported'
+      ;;
+  esac
+}
+
+install_just() {
+  platform="$(detect_platform)"
+
+  [ "$platform" != "unsupported" ] || fail "unsupported platform: $(uname -s)"
+  command -v curl >/dev/null 2>&1 || fail "curl is required"
+  command -v bash >/dev/null 2>&1 || fail "bash is required"
+
+  mkdir -p "$TOOLS_DIR"
+
+  say "detected platform: ${platform}"
+  say "installing just ${JUST_VERSION} into ${TOOLS_DIR}"
+
+  curl -fsSL "$INSTALLER_URL" | bash -s -- --to "$TOOLS_DIR" --tag "$JUST_VERSION" --force
+
+  [ -x "$TOOLS_DIR/just" ] || fail "just binary was not installed to ${TOOLS_DIR}/just"
+
+  chmod 755 "$TOOLS_DIR/just"
+
+  say "local binary: ${TOOLS_DIR}/just"
+  say "repo wrapper: ${REPO_ROOT}/just"
+  say "run commands with: ./just --list"
+}
+
+tool="${1:-}"
+
+case "$tool" in
+  just)
+    install_just
+    ;;
+  ""|-h|--help|help)
+    usage
+    ;;
+  *)
+    fail "unsupported tool: ${tool}"
+    ;;
+esac
