@@ -48,35 +48,47 @@ SentinelFetal2-Production/
 
 ---
 
-## Prerequisites
+## Getting Started
 
-- Python 3.12
-- uv (https://docs.astral.sh/uv/)
-- Node.js 18+
-- Docker Desktop (optional, for containerized workflows)
+Choose one workflow:
 
----
+| Workflow | Best for | Install on your machine | Start command | Open |
+|----------|----------|-------------------------|---------------|------|
+| **Run locally** | Direct Python/Node development | Python `3.12`, `uv`, Node.js `18+` | `uv run ...` + `npm run dev` | `http://localhost:5173` |
+| **Docker dev** | Containerized development with hot reload | Docker Desktop | `docker compose up --build` or `./just dev-build` | `http://localhost:5173` |
+| **Docker prod-like** | Containerized deployment-style run | Docker Desktop | `docker compose -f docker-compose.prod.yml up --build -d` or `./just prod-build` | `http://localhost` |
 
-## Setup (first time only)
+For the full step-by-step guide, see [docs/getting_started.md](/Users/tzoharlary/Documents/Projects/SentinelFetal2-Production/docs/getting_started.md). For Docker architecture and background, see [docs/docker_guide.md](/Users/tzoharlary/Documents/Projects/SentinelFetal2-Production/docs/docker_guide.md).
 
-### 1. Clone the repository
+The repository already includes the production artifacts, fold weights, and demo recordings required for local inference and Docker runs.
+
+### First Step for All Workflows
+
+Clone the repository first:
 
 ```bash
 git clone https://github.com/ArielShamay/SentinelFetal2-Production.git
 cd SentinelFetal2-Production
 ```
 
-### 2. Install Python dependencies (uv-native)
+<details>
+<summary><strong>Option A — Run Locally</strong></summary>
+
+Use this workflow when you want direct control over the Python and frontend processes without Docker.
+
+Requirements:
+
+- Python `3.12`
+- `uv`
+- Node.js `18+`
+
+Install backend dependencies:
 
 ```bash
 uv sync --locked
 ```
 
-> The project is configured for **CPU-first PyTorch resolution** via uv sources/index metadata.
-
-The production artifacts, fold weights, and demo recordings required for a local run are already included in the repository.
-
-### 3. Install frontend dependencies
+Install frontend dependencies:
 
 ```bash
 cd frontend
@@ -84,117 +96,71 @@ npm install
 cd ..
 ```
 
----
-
-## Running the System Locally
-
-Open **two terminals** from the project root.
-
-### Terminal 1 — Backend
+Start the backend in Terminal 1:
 
 ```bash
 uv run --locked uvicorn api.main:app --port 8000
 ```
 
-Wait for:
-```
-SentinelFetal2 starting up
-Loaded 5 PatchTST fold models
-SegmentStore loaded: 2479 entries across 9 event types
-Uvicorn running on http://0.0.0.0:8000
-```
-
-### Terminal 2 — Frontend
+Start the frontend in Terminal 2:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Wait for:
+Then open **http://localhost:5173**, click **▶ Start**, and use **10×** if you want to shorten the warmup period.
+
+Stop the local workflow with `Ctrl+C` in each terminal.
+
+</details>
+
+---
+
+<details>
+<summary><strong>Option B — Run with Docker</strong></summary>
+
+Use this workflow when you want Docker to start both services for you. There are always two services, `backend` and `frontend`, and there are two Docker run modes:
+
+- `dev`: Vite frontend on `http://localhost:5173` with hot reload
+- `prod-like`: nginx frontend on `http://localhost` with a more deployment-style runtime
+
+You can launch those Docker modes in two ways:
+
+- raw Docker commands
+- the repository-local `./just` wrapper
+
+If you want the wrapper, run this once per checkout:
+
+```bash
+./setup just
 ```
-VITE v5.4.x  ready in ~800ms
-Local:   http://localhost:5173/
-```
 
-### Start the simulation
+This downloads a repository-local `just` binary into `.tools/just` and does not modify your global `PATH`.
 
-1. Open **http://localhost:5173** in your browser.
-2. In the top bar, set the **Beds** counter (1–16) to the number of beds you want.
-3. Click **▶ Start** — the system assigns random CTG recordings to each bed and begins streaming.
-4. After ~450 seconds (7.5 min) of warmup per bed, risk scores begin appearing.
+### Docker dev
 
-> **Tip:** Click **10×** to compress warmup to ~45 seconds.
+| How | First run | Later runs | Stop | Open |
+|-----|-----------|------------|------|------|
+| Raw Docker | `docker compose up --build` | `docker compose up` | `docker compose down` | `http://localhost:5173` |
+| `./just` | `./just dev-build` | `./just dev` | `./just dev-down` | `http://localhost:5173` |
 
-### Stopping the System
+### Docker prod-like
 
-**Stop the simulation** (keeps servers running, resets all beds):
-- Click **⏹ Stop** in the top bar.
+| How | First run | Later runs | Stop | Open |
+|-----|-----------|------------|------|------|
+| Raw Docker | `docker compose -f docker-compose.prod.yml up --build -d` | `docker compose -f docker-compose.prod.yml up -d` | `docker compose -f docker-compose.prod.yml down` | `http://localhost` |
+| `./just` | `./just prod-build` | `./just prod` | `./just prod-down` | `http://localhost` |
 
-**Shut down the backend**:
-- Press `Ctrl+C` in Terminal 1 (uv run + uvicorn).
+</details>
 
-**Shut down the frontend**:
-- Press `Ctrl+C` in Terminal 2 (Vite).
+---
+
+## Using the UI
 
 ### Viewing a bed in detail
 
 Click any bed card — a **floating modal** opens over the ward showing the full CTG chart, risk gauge, clinical findings, and alert history. All other bed cards continue updating in the background. Close with **×** or by clicking outside the panel.
-
----
-
-## Docker Workflows
-
-The repository now ships with two containerized workflows:
-
-- `docker-compose.yml` is the **development stack**. It runs the backend with `uvicorn --reload`, runs the frontend with the Vite dev server on port `5173`, and bind-mounts the working tree for live code edits.
-- `docker-compose.prod.yml` is the **prod-like stack**. It uses the self-contained backend image, serves the frontend through nginx on port `80`, and keeps only logs on a named Docker volume.
-
-### Docker Mental Model
-
-- There are always **two services**: `backend` and `frontend`.
-- There are **three image definitions**:
-  - one backend image from `Dockerfile`
-  - one frontend dev image from `frontend/Dockerfile.dev`
-  - one frontend prod image from `frontend/Dockerfile.frontend`
-- There are **two run modes**:
-  - `dev` uses the backend image plus the frontend dev image
-  - `prod-like` uses the backend image plus the frontend prod image
-
-The backend image is shared by both modes because the backend runtime stays the same application. The frontend uses two different images because development uses the Vite dev server, while prod-like uses a prebuilt static site served by nginx.
-
-### Development stack
-
-```bash
-docker compose up --build
-```
-
-Endpoints:
-
-- Frontend: **http://localhost:5173**
-- Backend API: **http://localhost:8000**
-
-Use this stack when you want hot reload and fast local iteration.
-
-### Prod-like stack
-
-```bash
-docker compose -f docker-compose.prod.yml up --build -d
-```
-
-Endpoints:
-
-- Frontend: **http://localhost**
-- Backend API: **http://localhost:8000**
-
-Use this stack when you want a reproducible deployment-style run. The backend image pins `uv==0.9.7`, copies only the backend runtime surface into the image, and does not rely on host bind mounts for code, recordings, or weights.
-
-### Stopping the Docker stacks
-
-```bash
-docker compose down
-docker compose -f docker-compose.prod.yml down
-```
 
 ---
 
@@ -215,6 +181,9 @@ The system swaps the bed's recording to a real pathological recording from the c
 
 The backend exposes a REST + WebSocket API at `http://localhost:8000`.
 
+<details>
+<summary><strong>Endpoints</strong></summary>
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/health` | GET | Health check |
@@ -228,6 +197,8 @@ The backend exposes a REST + WebSocket API at `http://localhost:8000`.
 | `/api/god-mode/events/{id}` | DELETE | End a specific active event |
 | `/api/god-mode/clear/{bed_id}` | DELETE | Clear all events from a bed |
 | `/ws/stream` | WebSocket | Real-time bed state stream |
+
+</details>
 
 Interactive API docs: **http://localhost:8000/docs**
 
