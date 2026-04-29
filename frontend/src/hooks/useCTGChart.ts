@@ -19,10 +19,23 @@ import type { IChartApi, ISeriesApi, IPriceLine, Time } from 'lightweight-charts
 import { chartUpdateBus } from '../utils/chartUpdateBus'
 import type { DetectionEvent, EventAnnotation } from '../types'
 
-const COLOR_FHR  = '#111827'
-const COLOR_UC   = '#6b7280'
-const COLOR_BG   = '#ffffff'
-const COLOR_GRID = '#e5e7eb'
+const COLOR_FHR   = '#111827'
+const COLOR_UC    = '#6b7280'
+const COLOR_BG    = '#ffffff'
+const COLOR_GRID  = '#e5e7eb'
+const COLOR_ALERT = '#dc2626'
+
+function getPointColor(
+  timeSec: number,
+  events: DetectionEvent[],
+): string | undefined {
+  for (const e of events) {
+    const startT = e.start_sample / 4.0
+    const endT = e.end_sample !== null ? e.end_sample / 4.0 : Infinity
+    if (timeSec >= startT && timeSec < endT) return COLOR_ALERT
+  }
+  return undefined
+}
 
 export function useCTGChart(
   containerRef: React.RefObject<HTMLElement | null>,
@@ -35,6 +48,8 @@ export function useCTGChart(
   const fhrSeries    = useRef<ISeriesApi<'Line'> | null>(null)
   const ucSeries     = useRef<ISeriesApi<'Line'> | null>(null)
   const baselineLine = useRef<IPriceLine | null>(null)
+  const detectionRef = useRef(detectionHistory)
+  detectionRef.current = detectionHistory
 
   // ── Create chart once (no compact variant — Sparkline handles ward tiles) ──
   useEffect(() => {
@@ -103,7 +118,7 @@ export function useCTGChart(
     let unsubLive: (() => void) | null = null
 
     // Pending point buffers — drained by the RAF callback
-    const pendingFhr: { time: Time; value: number }[] = []
+    const pendingFhr: { time: Time; value: number; color?: string }[] = []
     const pendingUc:  { time: Time; value: number }[] = []
 
     const flush = () => {
@@ -135,7 +150,11 @@ export function useCTGChart(
         if (hist) {
           const step = 0.25
           try {
-            fhrS.setData(hist.fhrVals.map((v, i) => ({ time: (hist.tStart + i * step) as Time, value: v })))
+            fhrS.setData(hist.fhrVals.map((v, i) => {
+              const t = hist.tStart + i * step
+              const c = getPointColor(t, detectionRef.current)
+              return c ? { time: t as Time, value: v, color: c } : { time: t as Time, value: v }
+            }))
             ucS.setData(hist.ucVals.map((v,  i) => ({ time: (hist.tStart + i * step) as Time, value: v })))
           } catch { /* chart removed between frame scheduling and execution */ }
         }
@@ -148,7 +167,12 @@ export function useCTGChart(
         if (!live) return
         const step = 0.25
         for (let i = 0; i < fhrVals.length; i++) {
-          pendingFhr.push({ time: (tStart + i * step) as Time, value: fhrVals[i] })
+          const t = tStart + i * step
+          const c = getPointColor(t, detectionRef.current)
+          pendingFhr.push(c
+            ? { time: t as Time, value: fhrVals[i], color: c }
+            : { time: t as Time, value: fhrVals[i] }
+          )
         }
         for (let i = 0; i < ucVals.length; i++) {
           pendingUc.push({ time: (tStart + i * step) as Time, value: ucVals[i] })
@@ -166,6 +190,30 @@ export function useCTGChart(
       pendingUc.length  = 0
     }
   }, [bedId])
+
+  // ── Retroactive red coloring when detection events change ──────────────
+  // When a new event opens (with start_sample in the past), we need to
+  // re-color already-rendered points. Rebuilds FHR data from chartUpdateBus.
+  useEffect(() => {
+    if (!bedId || detectionHistory.length === 0) return
+    const fhrS = fhrSeries.current
+    if (!fhrS) return
+
+    const hist = chartUpdateBus.getHistory(bedId)
+    if (!hist) return
+
+    requestAnimationFrame(() => {
+      if (!fhrSeries.current) return
+      const step = 0.25
+      try {
+        fhrSeries.current.setData(hist.fhrVals.map((v, i) => {
+          const t = hist.tStart + i * step
+          const c = getPointColor(t, detectionHistory)
+          return c ? { time: t as Time, value: v, color: c } : { time: t as Time, value: v }
+        }))
+      } catch { /* chart may have been removed */ }
+    })
+  }, [detectionHistory, bedId])
 
   // ── Baseline price line ────────────────────────────────────────────────
   useEffect(() => {
@@ -239,7 +287,7 @@ export function useCTGChart(
       const result: Parameters<typeof fhr.setMarkers>[0] = [{
         time: (e.start_sample / 4.0) as Time,
         position: 'belowBar',
-        color: COLOR_FHR,
+        color: COLOR_ALERT,
         shape: 'arrowDown',
         text: label,
       }]
@@ -247,7 +295,7 @@ export function useCTGChart(
         result.push({
           time: (e.end_sample / 4.0) as Time,
           position: 'aboveBar',
-          color: COLOR_UC,
+          color: COLOR_ALERT,
           shape: 'arrowUp',
           text: '',
         })
@@ -256,7 +304,7 @@ export function useCTGChart(
         result.push({
           time: (e.peak_sample / 4.0) as Time,
           position: 'inBar',
-          color: COLOR_FHR,
+          color: COLOR_ALERT,
           shape: 'circle',
           text: '',
         })
