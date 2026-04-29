@@ -1,0 +1,1 @@
+{"mcpServers":{"MCP_DOCKER":{"command":"docker","args":["mcp","gateway","run","--profile","sentinelfetal2_docker"],"env":{"LOCALAPPDATA":"C:\\Users\\ariel\\AppData\\Local","ProgramData":"C:\\ProgramData","ProgramFiles":"C:\\Program Files"}}}}

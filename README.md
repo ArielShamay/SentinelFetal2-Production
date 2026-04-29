@@ -58,7 +58,7 @@ Choose one workflow:
 | **Docker dev** | Containerized development with hot reload | Docker Desktop | `docker compose up --build` or `./just dev-build` | `http://localhost:5173` |
 | **Docker prod-like** | Containerized deployment-style run | Docker Desktop | `docker compose -f docker-compose.prod.yml up --build -d` or `./just prod-build` | `http://localhost` |
 
-For the full step-by-step guide, see [docs/getting_started.md](/Users/tzoharlary/Documents/Projects/SentinelFetal2-Production/docs/getting_started.md). For Docker architecture and background, see [docs/docker_guide.md](/Users/tzoharlary/Documents/Projects/SentinelFetal2-Production/docs/docker_guide.md).
+For the full step-by-step guide, see [docs/getting_started.md](docs/getting_started.md). For Docker architecture and background, see [docs/docker_guide.md](docs/docker_guide.md).
 
 The repository already includes the production artifacts, fold weights, and demo recordings required for local inference and Docker runs.
 

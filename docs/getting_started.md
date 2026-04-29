@@ -242,5 +242,5 @@ Choose **Docker prod-like** if:
 
 ## Related Documentation
 
-- Docker architecture and concepts: [docker_guide.md](/Users/tzoharlary/Documents/Projects/SentinelFetal2-Production/docs/docker_guide.md)
-- High-level project architecture: [ARCHITECTURE.md](/Users/tzoharlary/Documents/Projects/SentinelFetal2-Production/docs/ARCHITECTURE.md)
+- Docker architecture and concepts: [docker_guide.md](docker_guide.md)
+- High-level project architecture: [ARCHITECTURE.md](ARCHITECTURE.md)

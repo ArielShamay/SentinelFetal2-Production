@@ -1467,7 +1467,8 @@ SentinelFetal2-Production/
 ├── docs/                         ← ✅ קיים
 │   ├── system_summary_he.md
 │   └── PLAN.md                   ← 📄 זה המסמך
-└── requirements.txt              ← + fastapi uvicorn
+├── pyproject.toml                 ← ✅ מקור הסמכות לתלויות Python
+└── uv.lock                        ← ✅ lockfile reproducible ל-uv
 ```
 
 ---
@@ -1596,16 +1597,16 @@ class PipelineManager:
 
 ## נספח: תלויות חדשות להתקנה
 
-### Python (`requirements.txt` additions)
-```
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pydantic>=2.0
-pydantic-settings>=2.0
-# torch, numpy, scikit-learn, pandas — already in existing requirements.txt
+### Python (`pyproject.toml` + `uv.lock`)
+התלויות מנוהלות כיום דרך `uv`, כאשר `pyproject.toml` הוא מקור הסמכות ו-`uv.lock` מקבע את סביבת ההרצה.
+
+```bash
+uv sync --locked
 ```
 
-> **הערה:** `dash`, `plotly`, `dash-bootstrap-components` הנוכחיים ב-requirements.txt הופכים מיותרים לאחר המעבר ל-FastAPI + React. ניתן להסירם כאשר `ui/app.py` מוחלף. **אל תסיר אותם עד שה-React frontend עובד לחלוטין.**
+התלויות המרכזיות כוללות `fastapi`, `uvicorn[standard]`, `pydantic`, `pydantic-settings`, `websockets`, `torch==2.2.2` מאינדקס CPU של PyTorch, `numpy<2`, ו-`scikit-learn==1.6.1`.
+
+> **הערה:** `dash`, `plotly`, `dash-bootstrap-components` אינם חלק ממסלול ההרצה הראשי של FastAPI + React. אם צריך אותם למסך legacy, הם שייכים ל-optional dependencies ולא לקובץ requirements נפרד.
 
 ### Node.js (`frontend/package.json`)
 ```json
@@ -2946,19 +2947,20 @@ export function useFullscreen() {
 
 #### `Dockerfile`
 ```dockerfile
-FROM python:3.11-slim AS backend
+FROM python:3.12-slim AS backend
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 
 COPY . .
 
 # ── Startup validation ──────────────────────────
-RUN python scripts/validate_artifacts.py   # fails build if weights/scaler/lr missing
+RUN uv run --frozen python scripts/validate_artifacts.py   # fails build if weights/scaler/lr missing
 
 EXPOSE 8000
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", \
+CMD ["uv", "run", "--frozen", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", \
      "--workers", "1", "--log-level", "info"]
 ```
 

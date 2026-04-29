@@ -127,13 +127,13 @@ docker run hello-world
 ### Images
 ```bash
 # הורדת image מ-Docker Hub
-docker pull python:3.11-slim
+docker pull python:3.12-slim
 
 # הצגת כל ה-images המקומיים
 docker images
 
 # מחיקת image
-docker rmi python:3.11-slim
+docker rmi python:3.12-slim
 
 # בניית image מ-Dockerfile בתיקייה הנוכחית
 docker build -t my-app:latest .
@@ -145,13 +145,13 @@ docker build -t my-app:v1.0 -f Dockerfile.prod .
 ### Containers
 ```bash
 # הרצת קונטיינר (יוצא אחרי הרצה)
-docker run python:3.11-slim python --version
+docker run python:3.12-slim python --version
 
 # הרצה ברקע (detached)
 docker run -d --name my-backend -p 8000:8000 my-app:latest
 
 # הרצה אינטראקטיבית (נכנס ל-shell)
-docker run -it python:3.11-slim bash
+docker run -it python:3.12-slim bash
 
 # הצגת קונטיינרים רצים
 docker ps
@@ -197,16 +197,17 @@ docker system prune -a
 ### מבנה בסיסי
 ```dockerfile
 # שכבת בסיס — מה ה-OS/runtime
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 # הגדרת תיקיית עבודה בתוך הקונטיינר
 WORKDIR /app
 
-# העתקת קבצים מהמחשב לקונטיינר
-COPY requirements.txt .
+# התקנת uv והעתקת קבצי התלויות
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml uv.lock ./
 
 # הרצת פקודות בשלב הבנייה
-RUN pip install --no-cache-dir -r requirements.txt
+RUN uv sync --frozen --no-dev
 
 # העתקת שאר הקוד
 COPY . .
@@ -215,7 +216,7 @@ COPY . .
 EXPOSE 8000
 
 # הפקודה שרצה כשהקונטיינר מתחיל
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "--frozen", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 ### Multi-Stage Build — בנייה בשלבים
@@ -439,16 +440,17 @@ networks:
 FROM python:latest
 
 # מומלץ — גרסה קבועה, reproducible
-FROM python:3.11-slim
+FROM python:3.12-slim
 ```
 
 ### 2. סדר שכבות לפי תדירות שינוי
 ```dockerfile
 # קבועים קודם (נכנסים ל-cache)
-FROM python:3.11-slim
+FROM python:3.12-slim
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 
 # משתנים אחרונים (קוד משתנה הכי הרבה)
 COPY . .
@@ -487,13 +489,13 @@ DB_PASSWORD=my_secret_password
 ### 7. Multi-stage build תמיד לפרויקטים גדולים
 ```dockerfile
 # שלב build: ~1GB (כולל compilers, dev dependencies)
-FROM python:3.11 AS builder
+FROM python:3.12 AS builder
 RUN pip install build
 COPY . .
 RUN python -m build
 
 # שלב production: ~200MB (רק runtime)
-FROM python:3.11-slim
+FROM python:3.12-slim
 COPY --from=builder /app/dist/*.whl .
 RUN pip install *.whl
 ```
@@ -761,7 +763,7 @@ server {
 
 ## 12. הרצת הפרויקט מאפס
 
-אם אתה מחפש מדריך כניסה מלא לכל מסלולי ההפעלה של הפרויקט, כולל הרצה לוקאלית רגילה וגם Docker, ראה את [docs/getting_started.md](/Users/tzoharlary/Documents/Projects/SentinelFetal2-Production/docs/getting_started.md). הקטע כאן נשאר ממוקד במסלולי Docker בלבד.
+אם אתה מחפש מדריך כניסה מלא לכל מסלולי ההפעלה של הפרויקט, כולל הרצה לוקאלית רגילה וגם Docker, ראה את [docs/getting_started.md](getting_started.md). הקטע כאן נשאר ממוקד במסלולי Docker בלבד.
 
 ### דרישות מוקדמות
 - Docker Desktop מותקן

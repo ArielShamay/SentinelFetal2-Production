@@ -645,16 +645,17 @@ export interface GodModeStatus {
 - **לא** בודק `data/recordings/` כאן — זה runtime check ב-lifespan
 - `sys.exit(1)` עם הסבר אם כשל
 
-**`Dockerfile`** (backend — Python 3.11-slim):
+**`Dockerfile`** (backend — Python 3.12 + uv):
 ```dockerfile
-FROM python:3.11-slim AS backend
+FROM python:3.12-slim AS backend
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir uv
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev
 COPY . .
-RUN python scripts/validate_artifacts.py   # fails build if artifacts missing
+RUN uv run --frozen python scripts/validate_artifacts.py   # fails build if artifacts missing
 EXPOSE 8000
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uv", "run", "--frozen", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
 ```
 
 **`frontend/Dockerfile.frontend`** (multi-stage — **לא** dev server):
@@ -701,19 +702,20 @@ GOD_MODE_ENABLED=false
 LOG_LEVEL=info
 ```
 
-**`requirements.txt` — וודא שנוספו:**
-```
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pydantic>=2.0
-pydantic-settings>=2.0
-websockets>=12.0
-```
+**`pyproject.toml` / `uv.lock` — מקור הסמכות לתלויות:**
+- `fastapi`
+- `uvicorn[standard]`
+- `pydantic`
+- `pydantic-settings`
+- `websockets`
+- `torch==2.2.2` דרך אינדקס CPU של PyTorch
+- `numpy<2`
+- `scikit-learn==1.6.1`
 
 ### בדיקה שהשלב הושלם
 ```bash
 # validate artifacts locally:
-python scripts/validate_artifacts.py
+uv run --locked python scripts/validate_artifacts.py
 # → ✓ All artifacts validated (5 folds)
 
 # docker build (רק backend — frontend build ארוך):
