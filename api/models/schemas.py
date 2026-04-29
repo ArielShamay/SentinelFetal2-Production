@@ -53,10 +53,21 @@ class BedUpdate(BaseModel):
     last_update_server_ts: float = 0.0
 
 
+class ChartTick(BaseModel):
+    """Single raw CTG sample emitted at 4 Hz for smooth chart rendering."""
+
+    bed_id: str
+    fhr: float
+    uc: float
+    t: float
+
+
 class BatchUpdateMessage(BaseModel):
     type: Literal["batch_update"] = "batch_update"
     timestamp: float
     updates: list[BedUpdate]
+    ward_chart_ticks: list[ChartTick] = Field(default_factory=list)
+    chart_ticks: list[ChartTick] = Field(default_factory=list)
 
 
 class InitialStateMessage(BaseModel):

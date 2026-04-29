@@ -11,6 +11,8 @@ import { wsClient } from '../services/wsClient'
 import { chartUpdateBus } from '../utils/chartUpdateBus'
 import type { WSMessage } from '../types'
 
+const CHART_TICKS_PER_CHUNK = 128
+
 export function useBedStream(): void {
   const updateFromWebSocket  = useBedStore(s => s.updateFromWebSocket)
   const initializeFromSnapshot = useBedStore(s => s.initializeFromSnapshot)
@@ -36,9 +38,28 @@ export function useBedStream(): void {
         for (const u of msg.updates) {
           updateFromWebSocket(u)
         }
-        // Chart ticks — 4 Hz raw samples, emitted every sample independently of inference
-        for (const tick of msg.chart_ticks ?? []) {
-          chartUpdateBus.publish(tick.bed_id, [tick.fhr], [tick.uc], tick.t)
+
+        // Ward ticks (downsampled ≤ 4 Hz): publish to ward channel for Sparkline components.
+        // These arrive for all beds at low rate — no chunking needed.
+        const wardTicks = msg.ward_chart_ticks ?? []
+        for (const tick of wardTicks) {
+          chartUpdateBus.publishWard(tick.bed_id, tick.fhr, tick.uc, tick.t)
+        }
+
+        // Detail ticks (full-rate, focused bed only): chunk large reconnect bursts.
+        const ticks = msg.chart_ticks ?? []
+        for (let i = 0; i < ticks.length; i += CHART_TICKS_PER_CHUNK) {
+          const chunk = ticks.slice(i, i + CHART_TICKS_PER_CHUNK)
+          const publishChunk = () => {
+            for (const tick of chunk) {
+              chartUpdateBus.publish(tick.bed_id, [tick.fhr], [tick.uc], tick.t)
+            }
+          }
+          if (i === 0) {
+            publishChunk()
+          } else {
+            window.setTimeout(publishChunk, 0)
+          }
         }
       } else if (msg.type === 'initial_state') {
         initializeFromSnapshot(msg.beds)

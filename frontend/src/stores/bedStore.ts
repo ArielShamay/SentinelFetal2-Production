@@ -6,6 +6,7 @@ import { create } from 'zustand'
 import type { BedUpdate, EventAnnotation } from '../types'
 import { RingBuffer } from '../utils/ringBuffer'
 import { playAlertTone } from '../utils/alertSound'
+import { chartUpdateBus } from '../utils/chartUpdateBus'
 
 // Sizes from PLAN.md §5
 const FHR_RING_SIZE = 2400   // 10 min × 60s × 4Hz
@@ -88,45 +89,47 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
 
   const prevAlert = bed.alert
 
-  // Push all new samples into ring buffers (O(1) per sample)
+  // Push all new samples into ring buffers (O(1) per sample).
+  // Ring buffers are intentionally kept by reference; scalar fields below
+  // return as a fresh BedData object so React.memo/Zustand see live changes.
   for (const v of u.fhr_latest) bed.fhrRing.push(v)
   for (const v of u.uc_latest) bed.ucRing.push(v)
   bed.riskHistory.push({ t: u.elapsed_seconds, v: u.risk_score })
-
-  // Overwrite scalar fields
-  bed.bedId = u.bed_id
-  bed.recordingId = u.recording_id
-  bed.riskScore = u.risk_score
-  bed.alert = u.alert
-  bed.alertThreshold = u.alert_threshold
-  bed.windowProb = u.window_prob
-  bed.baselineBpm = u.baseline_bpm
-  bed.isTachycardia = u.is_tachycardia > 0.5
-  bed.isBradycardia = u.is_bradycardia > 0.5
-  bed.variabilityAmplitudeBpm = u.variability_amplitude_bpm
-  bed.variabilityCategory = u.variability_category
-  bed.nLateDecelerations = u.n_late_decelerations
-  bed.nVariableDecelerations = u.n_variable_decelerations
-  bed.nProlongedDecelerations = u.n_prolonged_decelerations
-  bed.maxDecelerationDepthBpm = u.max_deceleration_depth_bpm
-  bed.sinusoidalDetected = u.sinusoidal_detected
-  bed.tachysystoleDetected = u.tachysystole_detected
-  bed.elapsedSeconds = u.elapsed_seconds
-  bed.warmup = u.warmup
-  bed.sampleCount = u.sample_count
-  bed.godModeActive = u.god_mode_active
-  bed.activeEvents = u.active_events
-  bed.riskDelta = u.risk_delta
-  bed.lastUpdate = u.last_update_server_ts > 0
-    ? u.last_update_server_ts
-    : Date.now() / 1000
 
   // Sound alert on transition false → true
   if (!prevAlert && u.alert) {
     playAlertTone()
   }
 
-  return bed
+  return {
+    ...bed,
+    bedId: u.bed_id,
+    recordingId: u.recording_id,
+    riskScore: u.risk_score,
+    alert: u.alert,
+    alertThreshold: u.alert_threshold,
+    windowProb: u.window_prob,
+    baselineBpm: u.baseline_bpm,
+    isTachycardia: u.is_tachycardia > 0.5,
+    isBradycardia: u.is_bradycardia > 0.5,
+    variabilityAmplitudeBpm: u.variability_amplitude_bpm,
+    variabilityCategory: u.variability_category,
+    nLateDecelerations: u.n_late_decelerations,
+    nVariableDecelerations: u.n_variable_decelerations,
+    nProlongedDecelerations: u.n_prolonged_decelerations,
+    maxDecelerationDepthBpm: u.max_deceleration_depth_bpm,
+    sinusoidalDetected: u.sinusoidal_detected,
+    tachysystoleDetected: u.tachysystole_detected,
+    elapsedSeconds: u.elapsed_seconds,
+    warmup: u.warmup,
+    sampleCount: u.sample_count,
+    godModeActive: u.god_mode_active,
+    activeEvents: u.active_events,
+    riskDelta: u.risk_delta,
+    lastUpdate: u.last_update_server_ts > 0
+      ? u.last_update_server_ts
+      : Date.now() / 1000,
+  }
 }
 
 export const useBedStore = create<BedStore>((set) => ({
@@ -138,16 +141,6 @@ export const useBedStore = create<BedStore>((set) => ({
     set(state => {
       const existing = state.beds.get(update.bed_id)
       const updated = applyUpdate(existing, update)
-      // Only create a new Map if something visible to WardView changed.
-      // This prevents unnecessary re-renders when only internal ring buffers change.
-      if (existing
-          && existing.riskScore === updated.riskScore
-          && existing.alert === updated.alert
-          && existing.warmup === updated.warmup
-          && existing.sampleCount === updated.sampleCount) {
-        state.beds.set(update.bed_id, updated)
-        return state  // same reference → no re-render
-      }
       const next = new Map(state.beds)
       next.set(update.bed_id, updated)
       return { beds: next }
@@ -162,6 +155,22 @@ export const useBedStore = create<BedStore>((set) => ({
       }
       return { beds: next }
     })
+
+    // Seed chartUpdateBus with the snapshot data so Sparklines and the detail
+    // chart have immediate context after a page refresh / reconnect.
+    // fhr_latest / uc_latest contain the last 24 samples (6 seconds at 4 Hz).
+    const step = 0.25
+    for (const u of updates) {
+      if (u.fhr_latest.length > 0) {
+        const tStart = u.elapsed_seconds - (u.fhr_latest.length - 1) * step
+        // Detail channel: full batch publish
+        chartUpdateBus.publish(u.bed_id, u.fhr_latest, u.uc_latest, tStart)
+        // Ward channel: one tick per sample so Sparkline ring buffer is seeded
+        for (let i = 0; i < u.fhr_latest.length; i++) {
+          chartUpdateBus.publishWard(u.bed_id, u.fhr_latest[i], u.uc_latest[i], tStart + i * step)
+        }
+      }
+    }
   },
 
   setConnected: (v: boolean) => set({ connected: v }),

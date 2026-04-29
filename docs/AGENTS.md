@@ -211,17 +211,28 @@ scripts/
 **`PipelineManager`:**
 - `__init__(broadcaster, models, scaler, lr, config)` — **broadcaster מגיע ראשון** (BUG-2)
 - `_executor = ThreadPoolExecutor(max_workers=4)`
-- `on_sample(bed_id, fhr, uc)`: `self._executor.submit(self._process_and_broadcast, ...)` — מחזיר מיידית
-- `_process_and_broadcast(pipeline, fhr, uc)`: קורא `pipeline.on_new_sample` → אם מחזיר state: `alert_history.record(state)` + `broadcaster.push(state)`
+- `_sample_counters: dict[str, int]` — counter per bed, incremented on event loop in `on_sample`
+- `on_sample(bed_id, fhr, uc)` — **event loop path (fast)**:
+  1. `_sample_counters[bed_id] += 1`
+  2. denormalize → fhr_bpm, uc_mmhg
+  3. `broadcaster.push_chart_tick(bed_id, fhr_bpm, uc_mmhg, t)` ← **לפני** inference
+  4. `self._executor.submit(self._process_and_broadcast_wrapped, ...)` — מחזיר מיידית
+- `_process_and_broadcast(pipeline, fhr, uc)` — **thread pool (slow)**:
+  - `pipeline.on_new_sample` → אם מחזיר state: `alert_history.record(state)` + `broadcaster.push(state)`
+  - **לא** דוחף chart tick — זה כבר נעשה ב-`on_sample`
 - **אסור:** `self._loop`, `run_coroutine_threadsafe` — push() הוא sync ו-thread-safe
 - `enable_god_mode()` — system-wide toggle (BUG-4)
-- `get_bed_states() -> list[BedState]` — snapshot לכל הלידות (לWebSocket initial_state)
+- `get_bed_states() -> list[BedState]` — snapshot לכל הלידות
 - `get_pipeline(bed_id) -> SentinelRealtime | None`
 
 **`AsyncBroadcaster`:**
-- `push(state: BedState)`: `self._queue.put_nowait(state)` — **סינכרוני, thread-safe** (ראה §9)
-- `async run()`: אוסף מה-queue, mounts ל-batch, שולח `{"type":"batch_update","updates":[...]}`
-- `async _heartbeat_loop()`: כל 5 שניות שולח `{"type":"heartbeat","ts":...}` (§11.4)
+- `_queue`: מקבל BedState מה-thread pool (נפח נמוך)
+- `_tick_queue`: מקבל chart ticks מה-event loop (נפח גבוה) — **נפרד** מ-`_queue`
+- `push(state)`: `self._queue.put_nowait(...)` — sync, thread-safe
+- `push_chart_tick(bed_id, fhr, uc, t)`: `self._tick_queue.put_nowait(...)` — event loop only
+- `set_focused_bed(client_id, bed_id)` / `clear_focused_bed(client_id)` — לניהול DetailView focus
+- `async _drain_loop()`: drain שתי ה-queues, ward-downsample ticks, שולח per-client `batch_update` עם `ward_chart_ticks` + `chart_ticks` (focused bed בלבד)
+- `async _heartbeat_loop()`: כל 5 שניות שולח `{"type":"heartbeat","ts":...}`
 
 **`/ws/stream` — initial state:**
 ```python
@@ -432,28 +443,31 @@ frontend/
     │   │                       updateFromWebSocket(), initializeFromSnapshot()
     │   └── uiStore.ts       ← simulationRunning, speed, godModeUnlocked, godModePin
     ├── hooks/
-    │   ├── useBedStream.ts  ← WebSocket connect, parse WSMessage (as WSMessage — typed cast),
-    │   │                       dispatch to bedStore + chartUpdateBus
-    │   ├── useCTGChart.ts   ← subscribe ל-chartUpdateBus, series.update() O(1)
+    │   ├── useBedStream.ts  ← WebSocket connect, parse WSMessage, dispatch to bedStore;
+    │   │                       ward_chart_ticks → chartUpdateBus.publishWard (Sparkline)
+    │   │                       chart_ticks → chartUpdateBus.publish (useCTGChart, focused bed only)
+    │   ├── useCTGChart.ts   ← detail chart only; RAF-batched live ticks; deferred setData history
     │   ├── useStaleDetector.ts  ← §11.4: detects > 15s without update
     │   └── useFullscreen.ts    ← §11.13
     ├── utils/
-    │   ├── ringBuffer.ts       ← RingBuffer<T> class (push, toArray, size)
-    │   └── chartUpdateBus.ts   ← ChartUpdateBus singleton (BUG-10)
+    │   ├── ringBuffer.ts       ← RingBuffer<T> class (push O(1), toArray, size)
+    │   └── chartUpdateBus.ts   ← ChartUpdateBus singleton; DETAIL channel (RingBuffer 4800)
+    │                               + WARD channel (RingBuffer 120); seeded by initializeFromSnapshot
     └── components/
         ├── layout/
         │   └── AppHeader.tsx   ← כותרת, status, fullscreen button, speed controls
         ├── ward/
         │   ├── WardView.tsx    ← grid 4×4, sorted by risk_score desc
-        │   └── BedCard.tsx     ← React.memo, risk bar (B&W), stale badge, alert border
+        │   └── BedCard.tsx     ← React.memo, risk bar (B&W), stale badge, Sparkline
         ├── detail/
-        │   ├── DetailView.tsx  ← layout: header + CTG chart + panels
-        │   ├── CTGChart.tsx    ← lightweight-charts container, useCTGChart hook
+        │   ├── DetailView.tsx  ← layout: header + CTG chart + panels; sends focus/unfocus to WS
+        │   ├── CTGChart.tsx    ← lightweight-charts container, useCTGChart hook (detail only)
         │   ├── RiskGauge.tsx   ← progress bar + score + delta arrows (§11.15)
         │   ├── FindingsPanel.tsx  ← 11 clinical features
         │   └── AlertHistory.tsx   ← list of alert transitions
         └── common/
-            ├── StatusBadge.tsx    ← LIVE / STALE / ALERT badges
+            ├── StatusBadge.tsx         ← LIVE / STALE / ALERT badges
+            ├── Sparkline.tsx           ← canvas-based CTG mini-strip (ward channel)
             └── SimulationControls.tsx  ← start/stop/pause/resume + speed [1×][2×][5×][10×]
 ```
 
@@ -469,40 +483,43 @@ export type WSMessage =
 
 **`useBedStream.ts`:**
 ```typescript
-const msg = JSON.parse(event.data) as WSMessage   // typed cast
-if (msg.type === 'initial_state') { store.initializeFromSnapshot(msg.beds) }
+const msg = JSON.parse(event.data) as WSMessage
+if (msg.type === 'initial_state') {
+  store.initializeFromSnapshot(msg.beds)  // גם מזריע chartUpdateBus (detail + ward)
+}
 else if (msg.type === 'batch_update') {
-  for (const u of msg.updates) {
-    store.updateFromWebSocket(u)
-    chartUpdateBus.publish(u.bed_id, u)   // עוקף React render cycle (BUG-10)
+  for (const u of msg.updates) { store.updateFromWebSocket(u) }
+  // Ward ticks (downsampled ≤4Hz, all beds) → Sparkline
+  for (const tick of msg.ward_chart_ticks ?? []) {
+    chartUpdateBus.publishWard(tick.bed_id, tick.fhr, tick.uc, tick.t)
+  }
+  // Detail ticks (full rate, focused bed only) → useCTGChart
+  for (const tick of msg.chart_ticks ?? []) {
+    chartUpdateBus.publish(tick.bed_id, [tick.fhr], [tick.uc], tick.t)
   }
 }
 ```
 
-**`chartUpdateBus.ts` (BUG-10):**
+**`chartUpdateBus.ts`** — שני ערוצים עם RingBuffer:
 ```typescript
-// Singleton pub/sub — decouples lightweight-charts from React render
-class ChartUpdateBus {
-  private subs = new Map<string, Set<(u: BedUpdate) => void>>()
-  subscribe(bedId: string, fn: (u: BedUpdate) => void) { ... }
-  unsubscribe(bedId: string, fn: (u: BedUpdate) => void) { ... }
-  publish(bedId: string, u: BedUpdate) { ... }
-}
-export const chartUpdateBus = new ChartUpdateBus()
+// DETAIL channel: publish() / subscribe() / getHistory()
+//   RingBuffer(4800) — 20 min × 4 Hz; עבור useCTGChart בלבד
+// WARD channel:   publishWard() / subscribeWard() / getWardHistory()
+//   RingBuffer(120) — ~30s; עבור Sparkline בלבד
+// initializeFromSnapshot מזין גם DETAIL וגם WARD (24 samples)
 ```
 
-**`useCTGChart.ts` (BUG-10):**
+**`useCTGChart.ts`** — detail בלבד, RAF batching:
 ```typescript
-useEffect(() => {
-  const handler = (u: BedUpdate) => {
-    for (const [fhr, uc, t] of zipSamples(u.fhr_latest, u.uc_latest, u.timestamp)) {
-      fhrSeries.update({ time: t, value: fhr * 160 + 50 })   // denorm for display
-      ucSeries.update({ time: t, value: uc * 100 })
-    }
-  }
-  chartUpdateBus.subscribe(bedId, handler)
-  return () => chartUpdateBus.unsubscribe(bedId, handler)
-}, [bedId])
+// History: setData() נדחה ל-requestAnimationFrame (UI shell ציור קודם)
+// Live: subscribe רק אחרי setData; מצבור ב-pendingFhr/pendingUc,
+//       drain ב-RAF יחיד (max 1 repaint לפריים)
+```
+
+**`Sparkline.tsx`** — ward canvas (קומפוננט חדש, `src/components/common/`):
+```typescript
+// subscribeWard() → dirty=true → RAF loop → drawLine() על canvas 2D
+// 16 מיטות = 16 canvases פשוטים, אפס lightweight-charts instances ב-WardView
 ```
 
 **עיצוב B&W בלבד (§8):** השתמש אך ורק ב-palette מה-PLAN.md — אין כחול, אדום, ירוק.  

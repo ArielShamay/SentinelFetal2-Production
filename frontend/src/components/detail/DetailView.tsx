@@ -2,7 +2,7 @@
 // Full-screen detail view for a single bed.
 // Used both as a route (/bed/:id) and inside a modal (bedId prop + onClose callback).
 
-import React from 'react'
+import React, { useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useBedStore } from '../../stores/bedStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -14,6 +14,7 @@ import { AlertHistory } from './AlertHistory'
 import { CTGChart } from './CTGChart'
 import { GodModePanel } from '../god-mode/GodModePanel'
 import { EventJournal } from '../god-mode/EventJournal'
+import { wsClient } from '../../services/wsClient'
 
 interface Props {
   bedId?: string
@@ -26,6 +27,17 @@ export const DetailView: React.FC<Props> = ({ bedId: propBedId, onClose }) => {
   const bed        = useBedStore(s => id ? s.beds.get(id) : undefined)
   const isStale    = useStaleDetector(bed?.lastUpdate ?? 0)
   const godModePin = useUIStore(s => s.godModePin)
+
+  // Notify backend that this client is focused on this bed so it receives
+  // full-rate chart ticks for the detail chart (Ruba 2).
+  useEffect(() => {
+    if (id) {
+      wsClient.send(JSON.stringify({ type: 'focus', bed_id: id }))
+    }
+    return () => {
+      wsClient.send(JSON.stringify({ type: 'unfocus' }))
+    }
+  }, [id])
 
   if (!bed) {
     return (

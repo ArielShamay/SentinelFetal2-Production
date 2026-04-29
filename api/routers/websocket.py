@@ -14,6 +14,7 @@ Protocol (§11.2):
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -46,10 +47,21 @@ async def ws_stream(websocket: WebSocket) -> None:
         beds_data = [dataclasses.asdict(s) for s in current_states]
         await websocket.send_json({"type": "initial_state", "beds": beds_data})
 
-        # Keep connection alive — broadcaster sends messages via _send_to_all()
-        # We just need to keep iterating (to handle disconnect)
-        async for _ in websocket.iter_text():
-            pass   # client messages are ignored (server-push only)
+        # Keep connection alive and handle focus/unfocus messages from client.
+        # Client sends: {"type": "focus", "bed_id": "bed_01"}
+        #               {"type": "unfocus"}
+        async for raw in websocket.iter_text():
+            try:
+                msg = json.loads(raw)
+                msg_type = msg.get("type")
+                if msg_type == "focus":
+                    bed_id = msg.get("bed_id", "")
+                    if bed_id:
+                        broadcaster.set_focused_bed(client_id, bed_id)
+                elif msg_type == "unfocus":
+                    broadcaster.clear_focused_bed(client_id)
+            except Exception:
+                pass  # malformed client message — ignore
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected: client=%s", client_id)

@@ -1,18 +1,20 @@
 // src/utils/chartUpdateBus.ts
-// Singleton pub/sub bus with per-bed ring buffer.
+// Singleton pub/sub bus with per-bed ring buffers.
 //
-// publish() always stores data — regardless of whether anyone is subscribed.
-// subscribe() registers the callback for LIVE ticks only (no synchronous replay).
-// getHistory() returns the full buffer snapshot for deferred initial load.
+// Two channels:
+//   DETAIL channel — full-rate ticks for the focused bed in DetailView.
+//     publish() / subscribe() / getHistory()
+//     Buffer: 4800 ticks (20 min × 4 Hz) per bed.  O(1) push via RingBuffer.
 //
-// This bypasses the React render cycle entirely (BUG-10):
-//   - Store update triggers re-render of WardView/BedCard cards
-//   - Chart update is delivered directly via this bus to useCTGChart
-//   - series.update() is called EXACTLY ONCE per WebSocket frame per bed
-//   - No zigzag artifacts from double-invoke (React Strict Mode or unrelated re-renders)
+//   WARD channel — downsampled ticks (≤ 4 Hz) for all beds, used by Sparkline.
+//     publishWard() / subscribeWard() / getWardHistory()
+//     Buffer: 120 ticks (~30 s at 4 Hz / ~2 min at 1 Hz) per bed.
 //
-// History load is intentionally async (requestAnimationFrame in useCTGChart) so
-// that navigation transitions paint first and the setData() call never blocks the browser.
+// Both channels bypass the React render cycle entirely.
+// seeding via initializeFromSnapshot ensures sparklines and the detail chart
+// show immediate context after a page refresh.
+
+import { RingBuffer } from './ringBuffer'
 
 type ChartCallback = (fhrVals: number[], ucVals: number[], tStart: number) => void
 
@@ -28,57 +30,70 @@ export interface HistorySnapshot {
   tStart: number
 }
 
-// 20 minutes × 4 Hz = 4800 ticks per bed (~115 KB total for 4 beds)
-const MAX_BUFFER = 4800
+const MAX_DETAIL_BUFFER = 4800   // 20 min × 4 Hz — O(1) push via RingBuffer
+const MAX_WARD_BUFFER   = 120    // ~30 s at 4 Hz / ~2 min at 1 Hz
 
 class ChartUpdateBus {
+  // ── Detail channel ────────────────────────────────────────────────────
   private subs    = new Map<string, ChartCallback>()
-  private buffers = new Map<string, TickRecord[]>()
+  private buffers = new Map<string, RingBuffer<TickRecord>>()
 
-  /**
-   * Subscribe a chart handler for LIVE ticks only.
-   * Does NOT replay history — call getHistory() + requestAnimationFrame instead.
-   * Returns an unsubscribe fn.
-   */
   subscribe(bedId: string, cb: ChartCallback): () => void {
     this.subs.set(bedId, cb)
     return () => this.subs.delete(bedId)
   }
 
-  /**
-   * Returns a snapshot of the full ring buffer for deferred initial load.
-   * Returns null if the buffer is empty.
-   */
   getHistory(bedId: string): HistorySnapshot | null {
     const buf = this.buffers.get(bedId)
-    if (!buf?.length) return null
+    if (!buf || buf.length === 0) return null
+    const arr = buf.toArray()
     return {
-      fhrVals: buf.map(r => r.fhr),
-      ucVals:  buf.map(r => r.uc),
-      tStart:  buf[0].t,
+      fhrVals: arr.map(r => r.fhr),
+      ucVals:  arr.map(r => r.uc),
+      tStart:  arr[0].t,
     }
   }
 
-  /** Publish chart data. Always buffered; delivered to subscriber if present. */
+  /** Publish full-rate tick(s) for the detail chart. Always buffered (O(1) per tick). */
   publish(bedId: string, fhrVals: number[], ucVals: number[], tStart: number): void {
-    // Store in ring buffer — always, regardless of subscriber
-    if (!this.buffers.has(bedId)) this.buffers.set(bedId, [])
-    const buf = this.buffers.get(bedId)!
-
+    if (!this.buffers.has(bedId)) {
+      this.buffers.set(bedId, new RingBuffer<TickRecord>(MAX_DETAIL_BUFFER))
+    }
+    const buf  = this.buffers.get(bedId)!
     const step = 0.25
     for (let i = 0; i < fhrVals.length; i++) {
       buf.push({ fhr: fhrVals[i], uc: ucVals[i], t: tStart + i * step })
     }
-
-    // Trim to MAX_BUFFER (keep most recent).
-    // Use slice + replace instead of splice to avoid O(N) in-place shift.
-    // Hysteresis of 100 avoids trimming on every single publish call.
-    if (buf.length > MAX_BUFFER + 100) {
-      this.buffers.set(bedId, buf.slice(-MAX_BUFFER))
-    }
-
-    // Deliver to current subscriber (if any)
     this.subs.get(bedId)?.(fhrVals, ucVals, tStart)
+  }
+
+  // ── Ward channel ──────────────────────────────────────────────────────
+  private wardSubs    = new Map<string, ChartCallback>()
+  private wardBuffers = new Map<string, RingBuffer<TickRecord>>()
+
+  subscribeWard(bedId: string, cb: ChartCallback): () => void {
+    this.wardSubs.set(bedId, cb)
+    return () => this.wardSubs.delete(bedId)
+  }
+
+  getWardHistory(bedId: string): HistorySnapshot | null {
+    const buf = this.wardBuffers.get(bedId)
+    if (!buf || buf.length === 0) return null
+    const arr = buf.toArray()
+    return {
+      fhrVals: arr.map(r => r.fhr),
+      ucVals:  arr.map(r => r.uc),
+      tStart:  arr[0].t,
+    }
+  }
+
+  /** Publish a single downsampled ward tick. Always buffered (O(1)). */
+  publishWard(bedId: string, fhr: number, uc: number, t: number): void {
+    if (!this.wardBuffers.has(bedId)) {
+      this.wardBuffers.set(bedId, new RingBuffer<TickRecord>(MAX_WARD_BUFFER))
+    }
+    this.wardBuffers.get(bedId)!.push({ fhr, uc, t })
+    this.wardSubs.get(bedId)?.([fhr], [uc], t)
   }
 }
 

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # ── Simulation ────────────────────────────────────────────────────────
     default_bed_count: int = 4          # beds started at lifespan startup
-    default_replay_speed: float = 10.0  # initial playback speed (1–20×)
+    default_replay_speed: float = 1.0   # initial playback speed (1–20×); override via SENTINEL_DEFAULT_REPLAY_SPEED
     max_beds: int = 16
 
     # ── God Mode ──────────────────────────────────────────────────────────

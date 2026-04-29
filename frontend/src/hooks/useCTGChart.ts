@@ -1,8 +1,17 @@
 // src/hooks/useCTGChart.ts
 // Creates a lightweight-charts instance in the provided container ref.
 // Two panes: FHR (top, right axis) and UC (bottom, left axis).
-// Subscribes to chartUpdateBus and calls series.update() — NEVER setData().
-// BUG-10: chart updates come from the bus, completely decoupled from React render.
+// Used exclusively for the full-size detail chart in DetailView.
+// Mini-strip in BedCard uses Sparkline instead.
+//
+// Live-tick batching (Ruba 4):
+//   Incoming ticks are buffered; a single requestAnimationFrame drains the buffer.
+//   This means at most one chart repaint per display frame regardless of tick rate.
+//
+// History loading (Ruba 4):
+//   setData() is deferred to the next frame so DetailView's shell (header, risk gauge,
+//   buttons) paints first. The chart subscribes AFTER setData so live ticks always
+//   have t > history end, preventing out-of-order errors.
 
 import { useEffect, useRef } from 'react'
 import { createChart, ColorType, LineStyle } from 'lightweight-charts'
@@ -10,7 +19,6 @@ import type { IChartApi, ISeriesApi, IPriceLine, Time } from 'lightweight-charts
 import { chartUpdateBus } from '../utils/chartUpdateBus'
 import type { EventAnnotation } from '../types'
 
-// B&W palette (PLAN.md §8)
 const COLOR_FHR  = '#111827'
 const COLOR_UC   = '#6b7280'
 const COLOR_BG   = '#ffffff'
@@ -21,18 +29,13 @@ export function useCTGChart(
   bedId: string,
   activeEvents?: EventAnnotation[],
   baselineBpm?: number,
-  compact?: boolean,
 ) {
-  const chartRef      = useRef<IChartApi | null>(null)
-  const fhrSeries     = useRef<ISeriesApi<'Line'> | null>(null)
-  const ucSeries      = useRef<ISeriesApi<'Line'> | null>(null)
-  const baselineLine  = useRef<IPriceLine | null>(null)
+  const chartRef     = useRef<IChartApi | null>(null)
+  const fhrSeries    = useRef<ISeriesApi<'Line'> | null>(null)
+  const ucSeries     = useRef<ISeriesApi<'Line'> | null>(null)
+  const baselineLine = useRef<IPriceLine | null>(null)
 
-  // Build time counter — each sample is spaced 1/4 s apart (4 Hz)
-  const nextTimeFHR = useRef<number>(Math.floor(Date.now() / 1000))
-  const nextTimeUC  = useRef<number>(Math.floor(Date.now() / 1000))
-
-  // ── Create chart once ──────────────────────────────────────────
+  // ── Create chart once (no compact variant — Sparkline handles ward tiles) ──
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -44,19 +47,17 @@ export function useCTGChart(
         background: { type: ColorType.Solid, color: COLOR_BG },
         textColor: COLOR_FHR,
       },
-      grid: compact
-        ? { vertLines: { visible: false }, horzLines: { visible: false } }
-        : { vertLines: { color: COLOR_GRID, style: LineStyle.Dotted }, horzLines: { color: COLOR_GRID, style: LineStyle.Dotted } },
-      rightPriceScale: compact ? { visible: false } : { visible: true, borderColor: COLOR_GRID },
-      leftPriceScale: compact ? { visible: false } : { visible: true, borderColor: COLOR_GRID },
-      timeScale: compact
-        ? { visible: false }
-        : { borderColor: COLOR_GRID, timeVisible: true, secondsVisible: false },
+      grid: {
+        vertLines: { color: COLOR_GRID, style: LineStyle.Dotted },
+        horzLines: { color: COLOR_GRID, style: LineStyle.Dotted },
+      },
+      rightPriceScale: { visible: true, borderColor: COLOR_GRID },
+      leftPriceScale:  { visible: true, borderColor: COLOR_GRID },
+      timeScale: { borderColor: COLOR_GRID, timeVisible: true, secondsVisible: false },
       crosshair: { mode: 0 },
     })
     chartRef.current = chart
 
-    // FHR — upper portion, right axis
     const fhr = chart.addLineSeries({
       color: COLOR_FHR,
       lineWidth: 1,
@@ -67,7 +68,6 @@ export function useCTGChart(
     chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.55 } })
     fhrSeries.current = fhr
 
-    // UC — lower portion, left axis
     const uc = chart.addLineSeries({
       color: COLOR_UC,
       lineWidth: 1,
@@ -78,7 +78,6 @@ export function useCTGChart(
     chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.55, bottom: 0.05 } })
     ucSeries.current = uc
 
-    // Resize observer
     const ro = new ResizeObserver(() => {
       chart.resize(container.clientWidth, container.clientHeight)
     })
@@ -87,69 +86,91 @@ export function useCTGChart(
     return () => {
       ro.disconnect()
       chart.remove()
-      chartRef.current   = null
-      fhrSeries.current  = null
-      ucSeries.current   = null
+      chartRef.current     = null
+      fhrSeries.current    = null
+      ucSeries.current     = null
       baselineLine.current = null
     }
-  }, [containerRef, compact])   // re-create if container or compact mode changes
+  }, [containerRef])
 
-  // ── Load history FIRST, then subscribe for live ticks ──
-  // History is loaded synchronously via setData() BEFORE subscribing,
-  // so live ticks (which arrive via update()) always have t > history end.
-  // This eliminates the race condition where deferred setData() overwrites
-  // live points that arrived between subscribe and setData.
-  // Compact mini-charts skip history entirely (no visual value at 112px).
+  // ── History + live subscription with RAF batching ──────────────────────
   useEffect(() => {
     if (!bedId) return
 
-    const fhr = fhrSeries.current
-    const uc  = ucSeries.current
+    let live = true
+    let rafHandle: number | null = null
+    let unsubLive: (() => void) | null = null
 
-    // Load history FIRST (full mode only, ~5ms for 4800 points)
-    if (!compact && fhr && uc) {
-      const hist = chartUpdateBus.getHistory(bedId)
-      if (hist) {
-        const step = 0.25
-        try {
-          fhr.setData(hist.fhrVals.map((v, i) => ({ time: (hist.tStart + i * step) as Time, value: v })))
-          uc.setData(hist.ucVals.map((v, i) => ({ time: (hist.tStart + i * step) as Time, value: v })))
-        } catch { /* ignore if chart was removed */ }
-      }
-    }
+    // Pending point buffers — drained by the RAF callback
+    const pendingFhr: { time: Time; value: number }[] = []
+    const pendingUc:  { time: Time; value: number }[] = []
 
-    // THEN subscribe for live ticks — all future ticks have t > history end
-    const unsubscribe = chartUpdateBus.subscribe(bedId, (fhrVals, ucVals, tStart) => {
+    const flush = () => {
+      rafHandle = null
       const fhrS = fhrSeries.current
       const ucS  = ucSeries.current
-      if (!fhrS || !ucS) return
-
-      const step = 0.25
-      for (let i = 0; i < fhrVals.length; i++) {
-        const t = (tStart + i * step) as Time
-        try { fhrS.update({ time: t, value: fhrVals[i] }) } catch { /* ignore out-of-order */ }
+      if (!fhrS || !ucS) {
+        pendingFhr.length = 0
+        pendingUc.length  = 0
+        return
       }
-      for (let i = 0; i < ucVals.length; i++) {
-        const t = (tStart + i * step) as Time
-        try { ucS.update({ time: t, value: ucVals[i] }) } catch { /* ignore out-of-order */ }
+      // Drain accumulated ticks in one pass — one chart repaint per frame
+      const fb = pendingFhr.splice(0)
+      const ub = pendingUc.splice(0)
+      for (const pt of fb) try { fhrS.update(pt) } catch { /* ignore out-of-order */ }
+      for (const pt of ub) try { ucS.update(pt)  } catch { /* ignore out-of-order */ }
+    }
+
+    // Defer history + subscription to the next frame so DetailView shell renders first.
+    // Subscribe AFTER setData so all live ticks have t > history end — no out-of-order errors.
+    requestAnimationFrame(() => {
+      if (!live) return
+
+      const fhrS = fhrSeries.current
+      const ucS  = ucSeries.current
+
+      if (fhrS && ucS) {
+        const hist = chartUpdateBus.getHistory(bedId)
+        if (hist) {
+          const step = 0.25
+          try {
+            fhrS.setData(hist.fhrVals.map((v, i) => ({ time: (hist.tStart + i * step) as Time, value: v })))
+            ucS.setData(hist.ucVals.map((v,  i) => ({ time: (hist.tStart + i * step) as Time, value: v })))
+          } catch { /* chart removed between frame scheduling and execution */ }
+        }
       }
 
-      if (fhrVals.length > 0) nextTimeFHR.current = tStart + fhrVals.length * step
-      if (ucVals.length > 0)  nextTimeUC.current  = tStart + ucVals.length  * step
+      if (!live) return  // component unmounted before frame fired
+
+      // Subscribe for live ticks AFTER history is loaded
+      unsubLive = chartUpdateBus.subscribe(bedId, (fhrVals, ucVals, tStart) => {
+        if (!live) return
+        const step = 0.25
+        for (let i = 0; i < fhrVals.length; i++) {
+          pendingFhr.push({ time: (tStart + i * step) as Time, value: fhrVals[i] })
+        }
+        for (let i = 0; i < ucVals.length; i++) {
+          pendingUc.push({ time: (tStart + i * step) as Time, value: ucVals[i] })
+        }
+        // Schedule a single flush for this frame — idempotent if already scheduled
+        if (rafHandle === null) rafHandle = requestAnimationFrame(flush)
+      })
     })
 
-    return unsubscribe
-  }, [bedId, compact])
+    return () => {
+      live = false
+      if (rafHandle !== null) { cancelAnimationFrame(rafHandle); rafHandle = null }
+      unsubLive?.()
+      pendingFhr.length = 0
+      pendingUc.length  = 0
+    }
+  }, [bedId])
 
-  // ── Baseline price line (skipped in compact mode) ───────────────
-  // Draws a dashed horizontal line at the computed baseline BPM.
-  // Gives the clinician visual reference of what the algorithm sees as baseline.
+  // ── Baseline price line ────────────────────────────────────────────────
   useEffect(() => {
-    if (compact) return
     const fhr = fhrSeries.current
     if (!fhr) return
 
-    // Remove previous line before drawing new one
     if (baselineLine.current) {
       try { fhr.removePriceLine(baselineLine.current) } catch { /* ignore */ }
       baselineLine.current = null
@@ -165,18 +186,17 @@ export function useCTGChart(
           axisLabelVisible: true,
           title: 'Baseline',
         })
-      } catch { /* ignore if series not ready */ }
+      } catch { /* series not ready */ }
     }
-  }, [baselineBpm, compact])
+  }, [baselineBpm])
 
-  // ── God Mode: event markers on FHR series (skipped in compact mode) ──
+  // ── God Mode: event markers on FHR series ─────────────────────────────
   useEffect(() => {
-    if (compact) return
     const fhr = fhrSeries.current
     if (!fhr) return
 
     if (!activeEvents?.length) {
-      try { fhr.setMarkers([]) } catch { /* ignore if chart removed */ }
+      try { fhr.setMarkers([]) } catch { /* ignore */ }
       return
     }
 
@@ -201,6 +221,6 @@ export function useCTGChart(
       return result
     }).sort((a, b) => (a.time as number) - (b.time as number))
 
-    try { fhr.setMarkers(markers) } catch { /* ignore if chart removed */ }
-  }, [activeEvents, compact])
+    try { fhr.setMarkers(markers) } catch { /* ignore */ }
+  }, [activeEvents])
 }

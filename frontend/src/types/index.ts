@@ -56,7 +56,8 @@ export interface BatchUpdateMessage {
   type: 'batch_update'
   timestamp: number
   updates: BedUpdate[]
-  chart_ticks: ChartTick[]   // real-time samples at 4 Hz; may be empty
+  ward_chart_ticks: ChartTick[]  // downsampled ≤ 4 Hz per bed — all clients, for mini-strips
+  chart_ticks: ChartTick[]       // full-rate ticks for focused bed in DetailView only
 }
 
 export interface InitialStateMessage {

@@ -1,6 +1,7 @@
 // src/components/detail/CTGChart.tsx
 // Container div that hosts a lightweight-charts instance via useCTGChart.
-// The chart updates come from chartUpdateBus — never through React state.
+// Used exclusively in DetailView — full-size chart with axes, baseline, markers.
+// Mini-strip in BedCard uses Sparkline (canvas-based) instead.
 
 import React, { useRef } from 'react'
 import { useCTGChart } from '../../hooks/useCTGChart'
@@ -10,17 +11,16 @@ interface Props {
   bedId: string
   activeEvents?: EventAnnotation[]
   baselineBpm?: number
-  compact?: boolean
 }
 
-export const CTGChart: React.FC<Props> = ({ bedId, activeEvents, baselineBpm, compact }) => {
+export const CTGChart: React.FC<Props> = ({ bedId, activeEvents, baselineBpm }) => {
   const containerRef = useRef<HTMLDivElement>(null)
-  useCTGChart(containerRef, bedId, activeEvents, baselineBpm, compact)
+  useCTGChart(containerRef, bedId, activeEvents, baselineBpm)
 
   return (
     <div
       ref={containerRef}
-      className={`w-full rounded overflow-hidden bg-white ${compact ? 'h-28' : 'h-72 border border-gray-200'}`}
+      className="w-full h-72 rounded overflow-hidden bg-white border border-gray-200"
     />
   )
 }

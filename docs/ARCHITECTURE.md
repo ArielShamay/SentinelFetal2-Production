@@ -62,23 +62,27 @@ without needing to open source files.
        │  ThreadPoolExecutor(max_workers=8)        │
        │  Backpressure: max 50 pending/bed         │
        │                                          │
-       │  Per sample in worker thread:            │
-       │    1. denormalize → fhr_bpm, uc_mmhg     │
-       │    2. push_chart_tick() ← FIRST          │
-       │    3. pipeline.on_new_sample() ← AFTER   │
+       │  on_sample() — event loop (fast path):   │
+       │    1. increment _sample_counters[bed_id] │
+       │    2. denormalize → fhr_bpm, uc_mmhg     │
+       │    3. push_chart_tick() ← immediately    │
+       │    4. executor.submit(inference task)    │
+       │                                          │
+       │  _process_and_broadcast() — thread pool: │
+       │    pipeline.on_new_sample() → BedState   │
        └──────────┬───────────────────────────────┘
                   │                    │
-         chart tick               BedState (every 40 samples)
+   chart tick (event loop)    BedState (every 24 samples)
                   │                    │
                   ▼                    ▼
-       ┌─────────────────────────────────────────────┐
-       │  AsyncBroadcaster                            │  api/services/broadcaster.py
-       │  queue.Queue  ←  thread-safe push            │
-       │  asyncio drain loop: every 0.05 s (50 ms)   │
-       │  concurrent sends: asyncio.gather()          │
-       │  per-client 2s timeout — slow clients        │
-       │  cannot block others                         │
-       └──────────────────────────┬──────────────────┘
+       ┌──────────────────────────────────────────────────┐
+       │  AsyncBroadcaster              broadcaster.py    │
+       │  _tick_queue  ← push_chart_tick() (event loop)  │
+       │  _queue       ← push() (thread pool)            │
+       │  drain loop: every 50ms                         │
+       │  ward downsampling: ≤ 4 Hz per bed              │
+       │  per-client focused_bed → detail ticks only     │
+       └──────────────────────────┬───────────────────────┘
                                   │  WebSocket
                                   ▼
                     ┌────────────────────────┐
@@ -86,26 +90,26 @@ without needing to open source files.
                     │  wsClient singleton    │
                     └────────────┬───────────┘
                                  │
-                    ┌────────────┴──────────────────┐
-                    │                               │
-            Inference updates               Chart ticks (4 Hz)
-                    │                               │
-                    ▼                               ▼
-         Zustand bedStore               chartUpdateBus
-         (risk, clinical,               (ring buffer 4800 pts,
-          fhrRing, ucRing)               slice() trim w/ hysteresis)
-                    │                           │
-                    ▼                           ▼
-              WardView /                 useCTGChart hook
-              DetailView UI             lightweight-charts
+                    ┌────────────┴────────────────────────────┐
+                    │                                         │
+            Inference updates               Chart ticks (ward + detail)
+                    │                                         │
+                    ▼                                         ▼
+         Zustand bedStore               chartUpdateBus (two channels)
+         (risk, clinical,               DETAIL: RingBuffer 4800 pts → useCTGChart
+          fhrRing, ucRing)              WARD:   RingBuffer 120 pts  → Sparkline
+                    │                                    │
+                    ▼                                    ▼
+              WardView /             WardView: Sparkline (canvas)
+              DetailView UI          DetailView: useCTGChart + lightweight-charts
 ```
 
-The system splits into **two independent data flows** at the broadcaster level:
+The system splits into **two independent data flows** at the event-loop level:
 
-- **Flow A — Inference**: sample → SentinelRealtime (PatchTST ensemble, runs every 40 samples) → BedState → Zustand store → React UI (risk score, clinical features, alert state)
-- **Flow B — Chart Ticks**: sample → denormalize → push_chart_tick → WebSocket → chartUpdateBus → lightweight-charts (raw waveform at 4 Hz)
+- **Flow A — Inference**: sample → thread pool → SentinelRealtime (PatchTST ensemble, every 24 samples) → BedState → Zustand store → React UI (risk scores, clinical features, alert state). Every 6 seconds per bed.
+- **Flow B — Chart Ticks**: sample → `on_sample()` on event loop → `push_chart_tick()` → broadcaster `_tick_queue` → WebSocket → `chartUpdateBus` (detail + ward channels) → Sparkline canvas / lightweight-charts. Every sample, independent of inference load.
 
-Flow B runs every sample. Flow A runs every 40 samples (every 10 seconds).
+Flow B is **fully decoupled from Flow A**: chart ticks are pushed on the event loop before inference is submitted to the thread pool, so AI latency never delays the waveform display.
 
 ---
 
@@ -302,81 +306,63 @@ class BedState:
 
 ### 2.4 AsyncBroadcaster (`api/services/broadcaster.py`)
 
-**Purpose**: Bridges the thread pool (sync) and the asyncio WebSocket (async). Provides a thread-safe inbox; a drain loop on the asyncio event loop empties it every 50ms and sends one `batch_update` WebSocket message to all connected clients concurrently.
+**Purpose**: Bridges the thread pool / event loop (sync) and the asyncio WebSocket (async). Two separate queues prevent AI inference backpressure from delaying chart ticks. Ward downsampling limits wire load at high replay speeds.
 
 **Data structures**:
 ```python
-self._queue: queue.Queue          # thread-safe; pushed from worker threads
-self._clients: dict[str, WebSocket]  # client_id → websocket
+self._queue:      queue.Queue(maxsize=1_000)   # BedState results — low volume
+self._tick_queue: queue.Queue(maxsize=50_000)  # chart ticks — high volume
+# client registry: client_id → {"ws": WebSocket, "focused_bed_id": str | None}
+self._clients: dict[str, dict]
+self._last_ward_t: dict[str, float]  # last emitted ward tick time per bed
 ```
 
-**`push_chart_tick(bed_id, fhr_bpm, uc_mmhg, t)`** — called from worker threads:
+**`push_chart_tick(bed_id, ...)`** — called from event loop in `on_sample()`:
 ```python
-self._queue.put_nowait({
-    "_kind": "tick",
-    "bed_id": bed_id,
-    "fhr": fhr_bpm,
-    "uc": uc_mmhg,
-    "t": t
-})
+self._tick_queue.put_nowait({"bed_id": ..., "fhr": ..., "uc": ..., "t": ...})
 ```
 
 **`push(state: BedState)`** — called from worker threads:
 ```python
-d = dataclasses.asdict(state)
-d["_kind"] = "state"
-self._queue.put_nowait(d)
+self._queue.put_nowait(dataclasses.asdict(state))
 ```
 
-**Drain loop** (asyncio task, runs while server is alive):
+**Focus tracking** (Ruba 2 — ward/detail split):
+- `set_focused_bed(client_id, bed_id)` — client opened DetailView; receives full-rate ticks for that bed.
+- `clear_focused_bed(client_id)` — client returned to WardView.
+- Triggered by `{"type": "focus", "bed_id": "..."}` / `{"type": "unfocus"}` messages from the browser.
+
+**Drain loop** (asyncio task):
 ```python
 async def _drain_loop(self) -> None:
     while self._running:
-        bed_states: list[dict] = []
-        chart_ticks: list[dict] = []
+        # 1. Drain states (max 128)
+        bed_states = [self._queue.get_nowait() for _ in range(128) or ...]
 
-        while True:
-            try:
-                item = self._queue.get_nowait()
-                if item.pop("_kind", "state") == "tick":
-                    chart_ticks.append(item)
-                else:
-                    bed_states.append(item)
-            except queue.Empty:
-                break
+        # 2. Drain ticks (max 4096); ward-downsample to ≤ 4 Hz per bed
+        ticks_by_bed: dict[str, list] = {}
+        ward_ticks: list = []
+        for tick in ...:
+            ticks_by_bed[tick["bed_id"]].append(tick)
+            if tick["t"] - self._last_ward_t.get(bid, -999) >= 0.25:
+                ward_ticks.append(tick)
+                self._last_ward_t[bid] = tick["t"]
 
-        if (bed_states or chart_ticks) and self._clients:
+        # 3. Per-client message (different detail ticks per focused bed)
+        for client_id, info in self._clients.items():
+            focused = info["focused_bed_id"]
             msg = {
                 "type": "batch_update",
-                "timestamp": time.time(),
                 "updates": bed_states,
-                "chart_ticks": chart_ticks,
+                "ward_chart_ticks": ward_ticks,          # ≤ 4 Hz, all beds
+                "chart_ticks": ticks_by_bed.get(focused, []),  # full rate, focused bed only
             }
-            await self._send_to_all(msg)
+            await self._send_one(client_id, info["ws"], json.dumps(msg))
 
-        await asyncio.sleep(_DRAIN_INTERVAL)  # 50ms
+        await asyncio.sleep(0.05)
 ```
 
-**Concurrent client sends** — `_send_to_all` serializes JSON once, then fans out to all clients in parallel with per-client timeouts:
-```python
-async def _send_to_all(self, msg: dict) -> None:
-    if not self._clients:
-        return
-    text = json.dumps(msg)   # serialize ONCE — not once per client
-    tasks = [
-        self._send_one(cid, ws, text)
-        for cid, ws in list(self._clients.items())
-    ]
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-async def _send_one(self, client_id: str, ws: WebSocket, text: str) -> None:
-    try:
-        if ws.client_state == WebSocketState.CONNECTED:
-            await asyncio.wait_for(ws.send_text(text), timeout=2.0)
-    except Exception as exc:
-        logger.debug("Failed to send to client %s: %s", client_id, exc)
-        await self.unregister(client_id)
-```
+**Key property**: `_tick_queue` and `_queue` are independent — a full AI inference backlog cannot drop or delay chart ticks, and vice versa. Heartbeat (`{"type":"heartbeat"}` every 5s) still uses `_send_to_all`.
 
 **Why concurrent sends matter**: With sequential sends, one slow or stuck WebSocket client blocks delivery to all other clients. `asyncio.gather()` with `return_exceptions=True` ensures all sends proceed concurrently; a failed or slow client is automatically unregistered and cannot delay others.
 
@@ -511,29 +497,29 @@ sample N (every sample) → on_new_sample()
 
 ```
 sample N (every sample)
-  → denormalize to BPM/mmHg
-  → broadcaster.push_chart_tick()
-  → drain loop (≤50ms later) → batch_update.chart_ticks[]
-  → websocket → useBedStream → chartUpdateBus.publish()
-  → useCTGChart subscription callback → series.update(point)
+  → on_sample() on event loop:
+      increment _sample_counters[bed_id]
+      denormalize → fhr_bpm, uc_mmhg
+      broadcaster.push_chart_tick()  ← _tick_queue
+  → drain loop (≤50ms later) → batch_update.ward_chart_ticks[] (all clients)
+                              → batch_update.chart_ticks[]      (focused client only)
+  → websocket → useBedStream:
+      ward_chart_ticks → chartUpdateBus.publishWard() → Sparkline RAF loop
+      chart_ticks      → chartUpdateBus.publish()     → useCTGChart RAF flush
 ```
 
-- Frequency: **every sample = 4 Hz** (at speed 1×).
-- Latency: up to 50ms drain = **~50ms** (no inference overhead).
-- Content: `{ bed_id, fhr (BPM), uc (mmHg), t (seconds) }`.
-- Side effects: calls `series.update()` on lightweight-charts instance directly — no React render cycle.
+- Frequency: **every sample = 4 Hz** (at speed 1×, configured via `SENTINEL_DEFAULT_REPLAY_SPEED`).
+- Latency: up to 50ms drain = **~50ms** (no inference overhead because chart tick is pushed before `executor.submit`).
+- Rendering: Sparkline uses `requestAnimationFrame` with dirty flag (1 canvas repaint/frame max). useCTGChart flushes pending ticks in a single RAF callback (1 chart repaint/frame max).
+- Side effects: no React render cycle triggered.
 
 ### Why decoupled?
 
-Without decoupling, the chart would only receive a new point every 6 seconds (on inference ticks). By pushing chart ticks independently and routing them through `chartUpdateBus` instead of Zustand, the waveform updates at the full 4 Hz rate regardless of PatchTST inference time, and without triggering any React re-renders.
+Chart ticks are pushed in `on_sample()` on the event loop **before** the inference task is submitted to the thread pool. This means AI latency (50–200ms per PatchTST run) has zero impact on chart smoothness. The old architecture pushed chart ticks from the worker thread after `on_new_sample()`, so heavy inference loads delayed the waveform.
 
 ### Timing: drain batching causes burst delivery
 
-The drain loop fires every 50ms. Between any two drains, at 4 Hz × 4 beds:
-- ~0–1 ticks per bed arrive per drain cycle.
-- Because the loop tick (0.25s) and drain (0.05s) are not synchronized, there will be drain cycles with 0 ticks and cycles with 1–2 ticks per bed.
-
-This burst behavior is inherent to the batched delivery model. The frontend chart receives ticks in irregular bursts every 50ms, rather than a clean 1 tick every 250ms — but lightweight-charts' canvas renderer handles this well.
+The drain loop fires every 50ms. At 1× with 4 beds: ~1 tick per bed arrives per drain cycle. The frontend RAF loops smooth this into a consistent 60fps visual update rate regardless of tick burst timing.
 
 ---
 
@@ -549,6 +535,7 @@ This burst behavior is inherent to the batched delivery model. The frontend char
 - `onStatus(handler)` — register a `connected: boolean` handler.
 - `connect(url)` — idempotent; will not open a second socket if already connected.
 - `disconnect()` — closes socket and cancels reconnect timer.
+- `send(data: string)` — sends a raw string to the server. No-op if not connected. Used by `DetailView` to send `focus`/`unfocus` messages.
 
 **Note**: the singleton pattern means all React components share one socket. If `useBedStream` unmounts and remounts (e.g. during strict mode double-invocation), `disconnect()` is called in the cleanup, which prevents reconnect loops.
 
@@ -575,18 +562,23 @@ if (msg.type === 'batch_update') {
     for (const u of msg.updates) {
         updateFromWebSocket(u)           // → bedStore
     }
-    // Chart ticks → chartUpdateBus (bypasses Zustand entirely)
+    // Ward ticks (downsampled ≤ 4 Hz, all beds) → WARD channel
+    for (const tick of msg.ward_chart_ticks ?? []) {
+        chartUpdateBus.publishWard(tick.bed_id, tick.fhr, tick.uc, tick.t)
+    }
+    // Detail ticks (full-rate, focused bed only) → DETAIL channel
+    // Large reconnect bursts are chunked via setTimeout to avoid monopolising the main thread.
     for (const tick of msg.chart_ticks ?? []) {
         chartUpdateBus.publish(tick.bed_id, [tick.fhr], [tick.uc], tick.t)
     }
 } else if (msg.type === 'initial_state') {
-    initializeFromSnapshot(msg.beds)    // → bedStore (full snapshot)
+    initializeFromSnapshot(msg.beds)    // → bedStore + chartUpdateBus (both channels)
 } else if (msg.type === 'heartbeat') {
     setHeartbeat(msg.ts)
 }
 ```
 
-**Important**: chart_ticks are published as **individual single-element arrays** per tick. `chartUpdateBus.publish` is called N times per message (once per tick), not once with all ticks. This is intentional — each tick arrives with its own timestamp `t` that must be delivered individually to the chart's `series.update()` call.
+**Ward vs. detail split**: `ward_chart_ticks` arrive for all beds at ≤ 4 Hz and feed `Sparkline` via the WARD channel. `chart_ticks` arrive only for the focused bed at full rate and feed `useCTGChart` via the DETAIL channel. Clients that have no focused bed receive an empty `chart_ticks` list.
 
 ---
 
@@ -654,55 +646,26 @@ updateFromWebSocket: (update: BedUpdate) => {
 
 ### 4.4 chartUpdateBus (`chartUpdateBus.ts`)
 
-**Purpose**: Singleton pub/sub bus + rolling buffer specifically for chart ticks. Completely bypasses Zustand to avoid React re-renders on every 4 Hz tick.
+**Purpose**: Singleton pub/sub bus + rolling buffers for chart ticks. Two independent channels bypass Zustand entirely, avoiding React re-renders on every tick.
 
-**Internal state**:
-```typescript
-class ChartUpdateBus {
-    private buffers = new Map<string, TickRecord[]>()  // bedId → last 4800 ticks
-    private subs    = new Map<string, ChartCallback>() // bedId → one active subscriber
-    // MAX_BUFFER = 4800 — 20 min × 4 Hz
-}
-```
+**Two channels**:
 
-**`publish(bedId, fhrVals, ucVals, tStart)`**:
-```typescript
-publish(bedId: string, fhrVals: number[], ucVals: number[], tStart: number): void {
-    if (!this.buffers.has(bedId)) this.buffers.set(bedId, [])
-    const buf = this.buffers.get(bedId)!
+| Channel | Method | Buffer | Subscriber | Used by |
+|---------|--------|--------|------------|---------|
+| DETAIL | `publish` / `subscribe` / `getHistory` | `RingBuffer(4800)` — 20 min × 4 Hz | `useCTGChart` | DetailView full chart |
+| WARD | `publishWard` / `subscribeWard` / `getWardHistory` | `RingBuffer(120)` — ~30 s at 4 Hz | `Sparkline` | BedCard mini-strip |
 
-    const step = 0.25
-    for (let i = 0; i < fhrVals.length; i++) {
-        buf.push({ fhr: fhrVals[i], uc: ucVals[i], t: tStart + i * step })
-    }
+**O(1) push via RingBuffer**: both channels use `RingBuffer<TickRecord>` from `ringBuffer.ts`. Unlike the previous `TickRecord[] + slice()` approach, push is always O(1) with no allocation on overflow.
 
-    // Trim with hysteresis — slice instead of splice to avoid O(N) in-place shift
-    if (buf.length > MAX_BUFFER + 100) {
-        this.buffers.set(bedId, buf.slice(-MAX_BUFFER))
-    }
+**`publish(bedId, fhrVals, ucVals, tStart)`**: pushes full-rate ticks from the detail stream (focused bed). Delivers immediately to the subscriber (if any), then stores in buffer.
 
-    // Deliver to subscriber if present
-    this.subs.get(bedId)?.(fhrVals, ucVals, tStart)
-}
-```
+**`publishWard(bedId, fhr, uc, t)`**: pushes a single downsampled ward tick (≤ 4 Hz). Used by `useBedStream` to feed `ward_chart_ticks` from the WebSocket message.
 
-**Buffer trimming design**: `Array.splice(0, N)` is O(N) because it shifts all remaining elements. `Array.slice(-MAX_BUFFER)` creates a new array in O(1) (reference copy). The hysteresis of 100 means trimming only runs when the buffer is 100 ticks over the limit, avoiding a trim on every single publish call.
+**`subscribe(bedId, cb)`** / **`subscribeWard(bedId, cb)`**: one subscriber per channel per bedId. Does NOT replay history — caller must call `getHistory()` / `getWardHistory()` on mount.
 
-**`subscribe(bedId, callback)`**:
-- Registers `callback` as the active subscriber for `bedId`.
-- **Does NOT replay history**. Subscriber only receives live ticks from this point forward.
-- Returns unsubscribe function.
-- One subscriber per bedId (last registration wins).
+**`getHistory(bedId)`** / **`getWardHistory(bedId)`**: returns `HistorySnapshot | null`. Called on chart/sparkline mount to seed initial data.
 
-**`getHistory(bedId): HistorySnapshot | null`**:
-```typescript
-interface HistorySnapshot {
-    fhrVals: number[]    // all buffered FHR values
-    ucVals: number[]     // all buffered UC values
-    tStart: number       // timestamp of the first buffered point
-}
-```
-Returns a snapshot of all buffered ticks for a bed, or `null` if no data. Used by `useCTGChart` to load historical data synchronously on chart mount before subscribing for live ticks.
+**Seeding on reconnect**: `bedStore.initializeFromSnapshot()` calls `chartUpdateBus.publish()` and `chartUpdateBus.publishWard()` for each bed in the initial snapshot, so charts and sparklines show context immediately after a page refresh.
 
 ---
 
@@ -723,15 +686,13 @@ class RingBuffer<T> {
 }
 ```
 
-Used in: `bedStore.ts` for `fhrRing`, `ucRing`, `riskHistory`.
-
-**chartUpdateBus uses a plain `TickRecord[]` array** (not RingBuffer) trimmed with `slice()` + hysteresis.
+Used in: `bedStore.ts` for `fhrRing`, `ucRing`, `riskHistory`; and `chartUpdateBus.ts` for both DETAIL and WARD tick buffers.
 
 ---
 
 ### 4.6 useCTGChart Hook
 
-**Purpose**: Creates and manages a `lightweight-charts` IChartApi instance. On mount, loads full history synchronously from `chartUpdateBus.getHistory()`, then subscribes to `chartUpdateBus` for live ticks. Supports `compact` and full modes.
+**Purpose**: Creates and manages a `lightweight-charts` IChartApi instance for the **full-size detail chart only**. Mini-strips in BedCard use `Sparkline` instead. Subscribed to the DETAIL channel of `chartUpdateBus`.
 
 **Signature**:
 ```typescript
@@ -740,26 +701,38 @@ function useCTGChart(
     bedId: string,
     activeEvents?: EventAnnotation[],
     baselineBpm?: number,
-    compact?: boolean
 ): void
 ```
 
-**Effect 1 — Chart creation** (`deps: [containerRef, compact]`):
-- Creates `IChartApi` via `createChart(containerRef.current)`.
-- Adds FHR series (right price scale, color `#111827`) and UC series (left price scale, color `#6b7280`).
-- `compact = true`: hides price scales, time scale, grid lines — visual strip only.
-- `compact = false`: shows full scales with labels, grid, crosshair.
-- Attaches `ResizeObserver` to resize chart on container size changes.
-- Returns cleanup: `chart.remove()`.
+**Effect 1 — Chart creation** (`deps: [containerRef]`):
+- Creates `IChartApi` with full axes, grid, time scale, crosshair.
+- Adds FHR series (right price scale, `#111827`) and UC series (left price scale, `#6b7280`).
+- Attaches `ResizeObserver`. Returns cleanup: `chart.remove()`.
+- No `compact` variant — `Sparkline` (canvas-based) handles all mini-strips.
 
-**Effect 2 — History load + subscription** (`deps: [bedId, compact]`):
+**Effect 2 — Deferred history + RAF-batched subscription** (`deps: [bedId]`):
 
 ```typescript
 useEffect(() => {
-    if (!bedId) return
-    const fhr = fhrSeries.current
-    const uc  = ucSeries.current
+    // Defer history setData to next frame — DetailView shell renders first
+    requestAnimationFrame(() => {
+        fhrS.setData(hist.fhrVals.map(...))  // full history in one pass
+        ucS.setData(hist.ucVals.map(...))
 
+        // Subscribe AFTER setData: live ticks always have t > history end
+        unsubLive = chartUpdateBus.subscribe(bedId, (fhrVals, ucVals, tStart) => {
+            // Accumulate in pendingFhr / pendingUc
+            if (rafHandle === null) rafHandle = requestAnimationFrame(flush)
+        })
+    })
+```
+
+**RAF batching**: incoming live ticks are buffered in `pendingFhr` / `pendingUc`; a single `requestAnimationFrame` drains the buffer with one chart repaint per display frame. This replaces the previous pattern of calling `series.update()` synchronously on every tick, which caused up to 640 `update()` calls/second at 10× with 16 beds.
+
+**Deferred history**: `setData()` is scheduled via `requestAnimationFrame` so DetailView's header, risk gauge, and controls paint before the potentially heavy history load. The subscription is opened INSIDE the RAF callback (after `setData`) to guarantee tick ordering.
+
+```typescript
+// Old pattern (removed):
     // 1. Load history FIRST (synchronously, before subscribing)
     //    Full mode only — compact charts skip history (no visual value at 112px height)
     if (!compact && fhr && uc) {
@@ -881,18 +854,12 @@ export const WardView: React.FC = () => {
 
 ```typescript
 export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
-    const isStale = useStaleDetector(bed.lastUpdate)
-
-    const handleClick = useCallback(() => onClick(bed.bedId), [onClick, bed.bedId])
-
     return (
         <button onClick={handleClick} ...>
-            {/* Risk score */}
-            {/* Risk bar — B&W gradient */}
-            {/* Recording ID */}
-            {/* Mini CTG strip */}
-            <div className="w-full mt-1 rounded overflow-hidden">
-                <CTGChart bedId={bed.bedId} compact />
+            {/* Risk score + risk bar + recording ID */}
+            {/* Mini CTG strip — canvas-based, not lightweight-charts */}
+            <div className="w-full h-28 mt-1 rounded overflow-hidden">
+                <Sparkline bedId={bed.bedId} />
             </div>
         </button>
     )
@@ -900,11 +867,9 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
 ```
 
 - `React.memo`: only re-renders when `bed` or `onClick` prop changes.
-- `onClick` is `(bedId: string) => void` — WardView passes a stable `useCallback` reference.
-- Inner `useCallback` wraps the `onClick(bed.bedId)` call to produce a stable handler for the `<button>`.
-- The `compact` CTGChart shows the raw waveform at 112px height (`h-28`) with no axes.
-- **Chart lifecycle**: `CTGChart` → `useCTGChart` creates a `lightweight-charts` instance on mount and subscribes to `chartUpdateBus`. Re-renders of BedCard do NOT recreate the chart — the chart is managed imperatively via the bus.
-- With 4 beds on WardView, there are 4 compact chart instances active simultaneously, all receiving live ticks at 4 Hz without triggering any React renders.
+- **`Sparkline`** (not `CTGChart`): canvas-based component that subscribes to the WARD channel of `chartUpdateBus`. Draws FHR (dark, top half) and UC (grey, bottom half) via a `requestAnimationFrame` loop with a dirty flag — only redraws when new ward ticks arrive.
+- With 16 beds, there are 16 `<canvas>` elements active simultaneously. Each is a plain 2D canvas with ~240 data points — negligible GPU/CPU cost compared to the previous 16 lightweight-charts instances.
+- Re-renders of BedCard do NOT affect the canvas — chart data is managed imperatively via `chartUpdateBus`.
 
 ---
 
@@ -930,11 +895,12 @@ function DetailView({ bedId: propBedId, onClose }: Props) {
 }
 ```
 
-- Used exclusively as a modal (no route). `bedId` prop is always provided by `App.tsx`.
-- `CTGChart` in full (non-compact) mode → history is loaded synchronously on mount via `setData()`.
-- `baselineBpm` and `activeEvents` come from Zustand (updated by Flow A every 10s).
-- After history load, live ticks from Flow B continue updating the chart at 4 Hz seamlessly.
-- When the modal opens, WardView's mini charts remain mounted and continue receiving ticks.
+- Navigated via React Router (`/bed/:id`).
+- On mount, sends `{"type":"focus","bed_id":"..."}` to the WebSocket server so this client receives full-rate detail ticks for the opened bed.
+- On unmount, sends `{"type":"unfocus"}` to return to ward-only ticks.
+- `CTGChart` uses deferred `setData()` + RAF-batched live updates (see §4.6).
+- `baselineBpm` and `activeEvents` come from Zustand (updated by Flow A every 6s).
+- BedCard `Sparkline` components on WardView remain mounted and continue receiving ward ticks while DetailView is open.
 
 ---
 
@@ -943,19 +909,18 @@ function DetailView({ bedId: propBedId, onClose }: Props) {
 ```typescript
 interface Props {
     bedId: string
-    compact?: boolean
     activeEvents?: EventAnnotation[]
     baselineBpm?: number
 }
 
-function CTGChart({ bedId, compact, activeEvents, baselineBpm }: Props) {
+function CTGChart({ bedId, activeEvents, baselineBpm }: Props) {
     const containerRef = useRef<HTMLDivElement>(null)
-    useCTGChart(containerRef, bedId, activeEvents, baselineBpm, compact)
+    useCTGChart(containerRef, bedId, activeEvents, baselineBpm)
 
     return (
         <div
             ref={containerRef}
-            className={`w-full rounded overflow-hidden bg-white ${compact ? 'h-28' : 'h-72 border border-gray-200'}`}
+            className="w-full h-72 rounded overflow-hidden bg-white border border-gray-200"
         />
     )
 }
@@ -1086,15 +1051,39 @@ This section documents all performance issues identified and fixed to make the s
 
 ### Fix 8 — setData() race with live ticks on DetailView mount (useCTGChart.ts)
 
-**Problem**: The hook previously subscribed for live ticks first, then deferred `setData(history)` to a double-`requestAnimationFrame` callback (~30ms later). During those 30ms, live ticks arrived via `update()` with timestamps beyond the history range. When `setData()` fired, it replaced the entire series including those live points, creating a visible gap or jump after navigation.
+**Problem**: The hook previously subscribed for live ticks first, then deferred `setData(history)`. During the delay, live ticks arrived with timestamps beyond history range; when `setData()` fired it replaced them, causing a visible gap.
 
-**Fix**: Load history synchronously first (`setData(history)` runs immediately inside the effect, before returning), then subscribe for live ticks. All subsequent `update()` calls have `t > history.end` and append cleanly. History load of 4800 points takes ~5ms — negligible, and eliminates the race entirely.
+**Fix (Ruba 4)**: Both history load and subscription are deferred together to `requestAnimationFrame`. Inside the RAF callback, `setData()` runs first, then the subscription is opened — so all live ticks have `t > history.end` and append cleanly.
 
-### Fix 9 — O(N) `Array.splice()` in hot path (chartUpdateBus.ts)
+### Fix 9 — O(N) buffer trimming in chartUpdateBus.ts
 
-**Problem**: Buffer trimming used `buf.splice(0, buf.length - MAX_BUFFER)`, which is O(N) because it shifts all remaining elements in place. At 4 Hz × 4 beds, this was called frequently.
+**Problem**: Buffer trimming used `buf.splice(0, N)` (O(N) shift) and `buf.slice(-MAX)` with hysteresis. At 4 Hz × 16 beds this caused frequent array allocations.
 
-**Fix**: Use `buf.slice(-MAX_BUFFER)` which creates a new array in O(1) (reference copy of the backing store). Added hysteresis of 100: trimming only runs when the buffer exceeds `MAX_BUFFER + 100`, avoiding a trim on every single publish call.
+**Fix (Ruba 5)**: Replaced `TickRecord[]` with `RingBuffer<TickRecord>` for both DETAIL (capacity 4800) and WARD (capacity 120) channels. `push()` is O(1) with no allocation on overflow. `toArray()` is called only in `getHistory()` / `getWardHistory()` on chart mount — not on every tick.
+
+### Fix 10 — 640 series.update() calls/second at 10× (useCTGChart.ts)
+
+**Problem**: Each chart tick called `series.update()` synchronously in the WebSocket message handler. At 10× speed with 16 beds: 16 × 40 Hz × 2 series = 1280 `update()` calls/second on the main thread.
+
+**Fix (Ruba 4)**: Live ticks are buffered in `pendingFhr`/`pendingUc`. A single `requestAnimationFrame` drains the buffer in one pass — at most 1 repaint per display frame per chart, regardless of tick rate.
+
+### Fix 11 — 16 lightweight-charts instances on WardView (BedCard.tsx / Sparkline.tsx)
+
+**Problem**: Each `BedCard` mounted a full `lightweight-charts` instance (canvas with axes, grid, labels) for a 112px mini-strip. 16 beds = 16 active chart instances with WebGL/canvas compositing overhead.
+
+**Fix (Ruba 3)**: Replaced `CTGChart compact` with `Sparkline` — a raw `<canvas>` with a hand-drawn 2D line. No chart library, no axes. RAF loop redraws only when `dirty = true`. 16 canvases with ~240 data points each is negligible CPU/GPU.
+
+### Fix 12 — Chart ticks delayed by AI inference (pipeline_manager.py)
+
+**Problem**: `push_chart_tick()` was called inside `_process_and_broadcast()` in the thread pool, after `pipeline.on_new_sample()`. During heavy inference (50–200ms), chart ticks were delayed.
+
+**Fix (Ruba 1)**: `push_chart_tick()` is now called in `on_sample()` on the event loop, before `executor.submit()`. AI inference latency has zero impact on waveform delivery.
+
+### Fix 13 — All clients receiving full-rate ticks for all beds (broadcaster.py)
+
+**Problem**: All WebSocket clients received chart ticks for every bed at full rate, even beds not currently being viewed. At 10× with 16 beds, each client received 640 ticks/s even if no DetailView was open.
+
+**Fix (Ruba 2)**: Ward downsampling (≤ 4 Hz) for `ward_chart_ticks` sent to all clients. Full-rate `chart_ticks` sent only to the client whose `focused_bed_id` matches. Clients send `{"type":"focus","bed_id":"..."}` when opening DetailView and `{"type":"unfocus"}` on close.
 
 ### Fix 10 — CPU saturation at 16 beds (pipeline_manager.py + pipeline.py)
 
@@ -1179,16 +1168,17 @@ uc_mmhg  = uc_norm * 100.0             # chart display mmHg
 | `frontend/src/App.tsx` | Root component: WS stream, modal overlay for DetailView, single `/` route |
 | `frontend/src/types.ts` | TypeScript interfaces: BedUpdate, ChartTick, WSMessage, EventAnnotation |
 | `frontend/src/services/wsClient.ts` | Singleton WebSocket with exponential backoff reconnect |
-| `frontend/src/hooks/useBedStream.ts` | WebSocket message router: bedStore + chartUpdateBus |
-| `frontend/src/hooks/useCTGChart.ts` | lightweight-charts lifecycle: create, load history then subscribe, baseline/markers |
-| `frontend/src/stores/bedStore.ts` | Zustand store with referential equality optimization: all beds, ring buffers, clinical state |
-| `frontend/src/utils/chartUpdateBus.ts` | Singleton pub/sub + ring buffer (slice/hysteresis trim) for 4 Hz chart ticks |
-| `frontend/src/utils/ringBuffer.ts` | Generic O(1) ring buffer for bedStore |
+| `frontend/src/hooks/useBedStream.ts` | WebSocket message router: bedStore + chartUpdateBus (ward + detail channels) |
+| `frontend/src/hooks/useCTGChart.ts` | lightweight-charts lifecycle for detail chart: deferred history, RAF-batched live ticks |
+| `frontend/src/stores/bedStore.ts` | Zustand store with referential equality optimization; `initializeFromSnapshot` seeds chartUpdateBus |
+| `frontend/src/utils/chartUpdateBus.ts` | Singleton pub/sub with two RingBuffer channels: DETAIL (4800) + WARD (120) |
+| `frontend/src/utils/ringBuffer.ts` | Generic O(1) ring buffer — used by bedStore and chartUpdateBus |
 | `frontend/src/utils/alertSound.ts` | Play alert tone on risk threshold breach |
-| `frontend/src/components/ward/WardView.tsx` | Ward grid with useMemo sort + useCallback; click → setSelectedBedId (modal) |
-| `frontend/src/components/ward/BedCard.tsx` | Single bed tile: risk badge, mini CTG chart (compact); React.memo + useCallback |
-| `frontend/src/components/detail/DetailView.tsx` | Full bed view rendered in modal overlay; accepts bedId+onClose props |
-| `frontend/src/components/detail/CTGChart.tsx` | lightweight-charts container div, compact/full mode (h-28 / h-72) |
+| `frontend/src/components/ward/WardView.tsx` | Ward grid with useMemo sort + useCallback; navigation to DetailView |
+| `frontend/src/components/ward/BedCard.tsx` | Single bed tile: risk badge + Sparkline mini-strip; React.memo + useCallback |
+| `frontend/src/components/common/Sparkline.tsx` | Canvas-based CTG mini-strip; subscribes to WARD channel; RAF + dirty flag |
+| `frontend/src/components/detail/DetailView.tsx` | Full bed view; sends focus/unfocus to WS; renders CTGChart + risk panels |
+| `frontend/src/components/detail/CTGChart.tsx` | lightweight-charts container for detail chart only (h-72, full axes) |
 | `frontend/src/components/GodModePanel.tsx` | God Mode controls: inject events, set PIN |
 
 ---

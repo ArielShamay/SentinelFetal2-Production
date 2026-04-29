@@ -7,7 +7,7 @@ import React, { useCallback } from 'react'
 import type { BedData } from '../../stores/bedStore'
 import { StatusBadge } from '../common/StatusBadge'
 import { useStaleDetector } from '../../hooks/useStaleDetector'
-import { CTGChart } from '../detail/CTGChart'
+import { Sparkline } from '../common/Sparkline'
 
 interface Props {
   bed: BedData
@@ -76,9 +76,9 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
         {bed.recordingId}
       </span>
 
-      {/* Mini CTG strip */}
-      <div className="w-full mt-1 rounded overflow-hidden">
-        <CTGChart bedId={bed.bedId} compact />
+      {/* Mini CTG strip — canvas-based sparkline, no heavyweight chart library */}
+      <div className="w-full h-28 mt-1 rounded overflow-hidden">
+        <Sparkline bedId={bed.bedId} />
       </div>
     </button>
   )

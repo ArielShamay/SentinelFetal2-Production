@@ -73,10 +73,12 @@ def validate_production_config(artifacts_dir: Path) -> dict:
     return cfg
 
 
-def validate_weights(weights: list[str]) -> None:
+def validate_weights(weights: list[str], weights_dir: Path | None = None) -> None:
     import torch
     for path_str in weights:
         path = Path(path_str)
+        if weights_dir is not None and not path.is_absolute():
+            path = weights_dir / path.name
         if not path.exists():
             _fail(f"Weight file not found: {path}")
         try:
@@ -142,8 +144,8 @@ def main() -> None:
     # 1. production_config.json
     cfg = validate_production_config(artifacts_dir)
 
-    # 2. Weight files (from config)
-    validate_weights(cfg["weights"])
+    # 2. Weight files (from config, optionally rooted at --weights-dir)
+    validate_weights(cfg["weights"], args.weights_dir)
 
     # 3. Scaler
     validate_sklearn_artifact(artifacts_dir / "production_scaler.pkl", "production_scaler.pkl")

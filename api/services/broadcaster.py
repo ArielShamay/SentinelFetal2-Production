@@ -1,13 +1,24 @@
 """
-api/services/broadcaster.py — AsyncBroadcaster: thread-safe queue → WebSocket push.
+api/services/broadcaster.py — AsyncBroadcaster: thread-safe queues → WebSocket push.
 
 Design:
-  PipelineManager.push(state)    — called from ThreadPoolExecutor (sync, thread-safe)
-  run()                          — async drain loop, batches pending states per tick
-  _heartbeat_loop()              — sends {"type":"heartbeat"} every 5 sec (§11.4)
+  _queue      — BedState inference results (low volume, ~every 6s per bed)
+  _tick_queue — raw chart ticks (high volume, up to 4 Hz × 16 beds × speed)
 
-push() uses queue.Queue.put_nowait — NOT a coroutine.
-Do NOT wrap with run_coroutine_threadsafe — push is synchronous by design.
+  push(state)             — called from ThreadPoolExecutor (sync, thread-safe)
+  push_chart_tick(...)    — called from event loop in on_sample() (sync, thread-safe)
+  run()                   — async drain loop + heartbeat loop
+  _heartbeat_loop()       — sends {"type":"heartbeat"} every 5 sec
+
+Per-client focus tracking (Ruba 2):
+  register(ws)            — returns client_id; focused_bed_id starts as None (ward view)
+  set_focused_bed(id, b)  — client moved to DetailView for bed b; receives full-rate ticks
+  clear_focused_bed(id)   — client returned to WardView; receives only ward ticks
+
+Ward downsampling:
+  Ward ticks are capped at 4 Hz per bed (≥ 0.25 s between consecutive ward ticks).
+  At speed 1× this is already the natural rate; at 10× it reduces wire load by 10×.
+  Detail clients receive every tick for their focused bed at full rate.
 """
 from __future__ import annotations
 
@@ -28,51 +39,60 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# How long the drain loop sleeps between queue polls (seconds)
-_DRAIN_INTERVAL = 0.05   # 50ms — well within 6-second update cadence
+_DRAIN_INTERVAL     = 0.05    # 50 ms — well within 6-second update cadence
+_MAX_STATE_QUEUE    = 1_000   # BedState items — low volume, small cap sufficient
+_MAX_TICK_QUEUE     = 50_000  # chart ticks   — high volume; large cap for speed bursts
+_MAX_STATES_DRAIN   = 128     # states read per drain cycle
+_MAX_TICKS_DRAIN    = 4_096   # ticks read per drain cycle (headroom for speed × 16 beds)
+_WARD_MIN_INTERVAL  = 0.25    # seconds between consecutive ward ticks per bed (≤ 4 Hz)
 
 
 class AsyncBroadcaster:
     """
-    Thread-safe queue → async WebSocket broadcast.
+    Thread-safe queues → async WebSocket broadcast.
 
-    push()  — synchronous, called from thread pool (queue.put_nowait)
-    run()   — async drain + heartbeat loop (started as asyncio.create_task)
+    push()           — synchronous, called from thread pool (queue.put_nowait)
+    push_chart_tick() — synchronous, called from event loop (queue.put_nowait)
+    run()            — async drain + heartbeat loop (started as asyncio.create_task)
     """
 
     def __init__(self) -> None:
-        self._queue: queue.Queue = queue.Queue()
-        self._clients: dict[str, WebSocket] = {}   # client_id → websocket
+        self._queue:      queue.Queue = queue.Queue(maxsize=_MAX_STATE_QUEUE)
+        self._tick_queue: queue.Queue = queue.Queue(maxsize=_MAX_TICK_QUEUE)
+
+        # client_id → {"ws": WebSocket, "focused_bed_id": str | None}
+        self._clients: dict[str, dict] = {}
+
+        # Last ward-tick time per bed for downsampling
+        self._last_ward_t: dict[str, float] = {}
+
         self._running: bool = False
 
-    # ── Primary interface: push from thread pool ──────────────────────────
+    # ── Primary interface: push from thread pool / event loop ─────────────
 
     def push(self, state: "BedState") -> None:
         """
         Thread-safe. Called from PipelineManager._process_and_broadcast().
         Converts BedState to serialisable dict and enqueues it.
-        push() is synchronous — NO asyncio involvement here.
         """
         try:
             d = dataclasses.asdict(state)
-            d["_kind"] = "state"
             self._queue.put_nowait(d)
         except queue.Full:
-            logger.warning("Broadcaster queue full — dropping BedState for %s", state.bed_id)
+            logger.warning("Broadcaster state queue full — dropping BedState for %s", state.bed_id)
 
     def push_chart_tick(self, bed_id: str, fhr_bpm: float, uc_mmhg: float, t: float) -> None:
         """
-        Thread-safe. Called from PipelineManager._process_and_broadcast() at 4 Hz.
-        Enqueues a single raw sample for real-time CTG chart streaming.
-        Chart tick loss is acceptable — drop silently on full queue.
+        Called from event loop in PipelineManager.on_sample() at the raw sample rate.
+        Separate queue from BedState results so AI inference load never delays chart ticks.
+        Drop silently on full queue (tick loss is acceptable).
         """
         try:
-            self._queue.put_nowait({
-                "_kind": "tick",
+            self._tick_queue.put_nowait({
                 "bed_id": bed_id,
-                "fhr": fhr_bpm,
-                "uc": uc_mmhg,
-                "t": t,
+                "fhr":    fhr_bpm,
+                "uc":     uc_mmhg,
+                "t":      t,
             })
         except queue.Full:
             pass
@@ -82,7 +102,7 @@ class AsyncBroadcaster:
     async def register(self, ws: WebSocket) -> str:
         """Register a new WebSocket client. Returns client_id."""
         client_id = str(uuid.uuid4())[:8]
-        self._clients[client_id] = ws
+        self._clients[client_id] = {"ws": ws, "focused_bed_id": None}
         logger.info("WebSocket client registered: %s (total=%d)", client_id, len(self._clients))
         return client_id
 
@@ -90,6 +110,18 @@ class AsyncBroadcaster:
         """Remove a disconnected client."""
         self._clients.pop(client_id, None)
         logger.info("WebSocket client unregistered: %s (total=%d)", client_id, len(self._clients))
+
+    def set_focused_bed(self, client_id: str, bed_id: str) -> None:
+        """Mark client as viewing DetailView for bed_id — receives full-rate ticks."""
+        if client_id in self._clients:
+            self._clients[client_id]["focused_bed_id"] = bed_id
+            logger.debug("Client %s focused on bed %s", client_id, bed_id)
+
+    def clear_focused_bed(self, client_id: str) -> None:
+        """Client returned to WardView — only ward (downsampled) ticks from now on."""
+        if client_id in self._clients:
+            self._clients[client_id]["focused_bed_id"] = None
+            logger.debug("Client %s unfocused (ward view)", client_id)
 
     # ── Async run loop ─────────────────────────────────────────────────────
 
@@ -113,55 +145,80 @@ class AsyncBroadcaster:
 
     async def _drain_loop(self) -> None:
         """
-        Polls queue every _DRAIN_INTERVAL.
-        Separates bed_states (inference results) from chart_ticks (raw 4 Hz samples)
-        and sends both in a single batch_update message per cycle.
+        Polls both queues every _DRAIN_INTERVAL.
+
+        Ward ticks:   at most 1 per bed every 0.25 s — keeps wire load bounded
+                      regardless of replay speed.
+        Detail ticks: all ticks for the bed a client is focused on — full rate.
         """
         while self._running:
+            # ── 1. Drain BedState updates ──────────────────────────────────
             bed_states: list[dict] = []
-            chart_ticks: list[dict] = []
-
-            # Drain everything currently in the queue (non-blocking)
-            while True:
+            drained = 0
+            while drained < _MAX_STATES_DRAIN:
                 try:
-                    item = self._queue.get_nowait()
-                    if item.pop("_kind", "state") == "tick":
-                        chart_ticks.append(item)
-                    else:
-                        bed_states.append(item)
+                    bed_states.append(self._queue.get_nowait())
+                    drained += 1
                 except queue.Empty:
                     break
 
-            if (bed_states or chart_ticks) and self._clients:
-                msg = {
-                    "type": "batch_update",
-                    "timestamp": time.time(),
-                    "updates": bed_states,
-                    "chart_ticks": chart_ticks,
-                }
-                await self._send_to_all(msg)
+            # ── 2. Drain chart ticks ───────────────────────────────────────
+            ticks_by_bed: dict[str, list[dict]] = {}
+            ward_ticks: list[dict] = []
+            drained = 0
+            while drained < _MAX_TICKS_DRAIN:
+                try:
+                    tick = self._tick_queue.get_nowait()
+                    drained += 1
+                    bid = tick["bed_id"]
+                    if bid not in ticks_by_bed:
+                        ticks_by_bed[bid] = []
+                    ticks_by_bed[bid].append(tick)
+
+                    # Ward downsampling: emit at most one tick per bed per 0.25 s
+                    t_val = tick["t"]
+                    if t_val - self._last_ward_t.get(bid, -999.0) >= _WARD_MIN_INTERVAL:
+                        ward_ticks.append(tick)
+                        self._last_ward_t[bid] = t_val
+                except queue.Empty:
+                    break
+
+            # ── 3. Send per-client (different detail ticks per focused bed) ─
+            if not self._clients:
+                await asyncio.sleep(_DRAIN_INTERVAL)
+                continue
+
+            if bed_states or ticks_by_bed:
+                ts = time.time()
+                for client_id, info in list(self._clients.items()):
+                    focused = info.get("focused_bed_id")
+                    detail_ticks = ticks_by_bed.get(focused, []) if focused else []
+                    msg = {
+                        "type":             "batch_update",
+                        "timestamp":        ts,
+                        "updates":          bed_states,
+                        "ward_chart_ticks": ward_ticks,
+                        "chart_ticks":      detail_ticks,
+                    }
+                    await self._send_one(client_id, info["ws"], json.dumps(msg))
 
             await asyncio.sleep(_DRAIN_INTERVAL)
 
     async def _heartbeat_loop(self) -> None:
-        """Sends {"type": "heartbeat", "ts": ...} every 5 seconds (§11.4)."""
+        """Sends {"type": "heartbeat", "ts": ...} every 5 seconds."""
         while self._running:
             await asyncio.sleep(5)
             if self._clients:
                 await self._send_to_all({"type": "heartbeat", "ts": time.time()})
 
     async def _send_to_all(self, msg: dict) -> None:
-        """Send a JSON message to all connected clients concurrently.
-
-        Serializes JSON once, sends the same text to all clients in parallel
-        with a per-client timeout so one slow client cannot block others.
-        """
+        """Serialize once, send to all clients concurrently (used for heartbeat)."""
         if not self._clients:
             return
         text = json.dumps(msg)
         tasks = [
-            self._send_one(cid, ws, text)
-            for cid, ws in list(self._clients.items())
+            self._send_one(cid, info["ws"], text)
+            for cid, info in list(self._clients.items())
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
 

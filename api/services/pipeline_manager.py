@@ -63,12 +63,17 @@ class PipelineManager:
         self._last_states: dict[str, "BedState"] = {}
         self._lock = threading.Lock()
 
-        # 8 workers: enough headroom for 16 beds × 1 inference/10s without queueing.
+        # 8 workers: enough headroom for 16 beds × 1 inference/6s without queueing.
         # Per-bed inference_offset in set_beds() staggers firing so beds don't
         # all run inference on the same sample tick (§10 CPU stagger fix).
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="sentinel-inf")
         # Backpressure: track pending tasks per bed to prevent unbounded queue growth
         self._pending: dict[str, int] = defaultdict(int)
+
+        # Per-bed sample counter — incremented on event loop in on_sample().
+        # Used to compute chart tick timestamp (t = counter / 4.0) without
+        # touching the pipeline under its lock. Reset atomically in set_beds().
+        self._sample_counters: dict[str, int] = defaultdict(int)
 
         self._god_mode_enabled: bool = False
         self._baseline_recordings: dict[str, str] = {}   # bed_id → original recording_id (BUG-11)
@@ -151,7 +156,7 @@ class PipelineManager:
 
         from src.inference.pipeline import SentinelRealtime
 
-        _INFERENCE_STRIDE = 40  # must match pipeline.py constant
+        _INFERENCE_STRIDE = int(self._config["inference_stride"])
         n_beds = len(resolved)
         new_pipelines: dict[str, SentinelRealtime] = {}
         for i, cfg in enumerate(resolved):
@@ -179,6 +184,8 @@ class PipelineManager:
             self._last_states = {}
             # BUG-11: remember original recording per bed for God Mode restore
             self._baseline_recordings = {c["bed_id"]: c["recording_id"] for c in resolved}
+            # Reset sample counters so chart timestamps restart from 0 for new beds
+            self._sample_counters = defaultdict(int)
 
         logger.info("Beds configured: %s", [c["bed_id"] for c in resolved])
 
@@ -205,13 +212,24 @@ class PipelineManager:
         Called by ReplayEngine at 4 Hz from the async event loop thread.
         Non-blocking: submits inference work to ThreadPoolExecutor and returns immediately.
         PatchTST inference (~50ms) runs off the event loop (BUG-8 prevention).
-        Backpressure: at extreme speed (20× with 16 beds), cap per-bed pending
-        tasks to prevent unbounded memory growth while still allowing enough
-        throughput for warmup and inference to complete.
+
+        Chart tick is pushed HERE, before the executor submit, so it is always
+        delivered at the raw sample rate regardless of AI inference load.
+        The sample counter is incremented on the event loop (single-threaded path)
+        so no lock is needed for the counter itself.
         """
         pipeline = self._pipelines.get(bed_id)
         if pipeline is None:
             return
+
+        # ── Fast path: push raw chart tick immediately (decoupled from inference) ──
+        self._sample_counters[bed_id] += 1
+        t = self._sample_counters[bed_id] / 4.0
+        fhr_bpm = round(fhr_norm * 160.0 + 50.0, 1)
+        uc_mmhg = round(uc_norm * 100.0, 1)
+        self._broadcaster.push_chart_tick(bed_id, fhr_bpm, uc_mmhg, t)
+
+        # ── Slow path: AI inference in thread pool ─────────────────────────────
         if self._pending[bed_id] >= 50:
             return  # backpressure — extreme load protection only
         self._pending[bed_id] += 1
@@ -242,16 +260,10 @@ class PipelineManager:
         push() is sync and thread-safe (queue.put_nowait) — no asyncio bridge needed.
         """
         try:
-            # Chart tick is pushed BEFORE on_new_sample() so that PatchTST inference
-            # (which runs every _INFERENCE_STRIDE samples and takes ~200ms) cannot delay
-            # the 4 Hz chart stream. t is pre-computed as (count+1)/4.0 to match the
-            # post-increment sample index that on_new_sample() will assign.
-            fhr_bpm = round(fhr_norm * 160.0 + 50.0, 1)
-            uc_mmhg = round(uc_norm * 100.0, 1)
-            t = (pipeline.current_sample_count + 1) / 4.0
-            self._broadcaster.push_chart_tick(pipeline.bed_id, fhr_bpm, uc_mmhg, t)
-
             state = pipeline.on_new_sample(fhr_norm, uc_norm)
+
+            # Chart tick is now pushed in on_sample() on the event loop — not here.
+            # This decouples raw chart data from AI inference latency.
 
             if state is None:
                 return

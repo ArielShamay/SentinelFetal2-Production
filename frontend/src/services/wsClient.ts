@@ -45,6 +45,13 @@ class WSClient {
     return () => this.statusHandlers.delete(handler)
   }
 
+  /** Send a raw string to the server. No-op if not connected. */
+  send(data: string): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(data)
+    }
+  }
+
   private _connect(): void {
     if (!this._active) return
 
