@@ -40,6 +40,8 @@ export interface BedUpdate {
   god_mode_active: boolean
   active_events: EventAnnotation[]
   risk_delta: number
+  top_contributions: FeatureContribution[]
+  detection_events: DetectionEvent[]
   last_update_server_ts: number
 }
 
@@ -99,6 +101,7 @@ export interface AlertEventSchema {
   risk_score: number
   alert_on: boolean
   elapsed_s: number
+  top_contributions: FeatureContribution[]
 }
 
 export interface AlertHistoryResponse {
@@ -117,6 +120,35 @@ export interface EventAnnotation {
   description: string
   timeline_summary: string          // "Started 00:12:34 | Duration: 00:03:20"
   detected_details: Record<string, number>  // {feature: overridden_value}
+}
+
+/** Per-feature LR logit contribution for explainability.
+ *  Backend sends scaled_value/coefficient as debug fields; UI can ignore them. */
+export interface FeatureContribution {
+  name: string
+  friendly_label: string
+  raw_value: number
+  contribution: number
+  direction: 'increases_risk' | 'decreases_risk'
+  scaled_value?: number
+  coefficient?: number
+}
+
+/** Model/rule detection interval emitted as a delta by the backend. */
+export interface DetectionEvent {
+  event_id: string
+  bed_id: string
+  source: 'model' | 'rule'
+  event_type: string
+  start_sample: number
+  end_sample: number | null
+  still_ongoing: boolean
+  peak_risk_score: number
+  peak_sample: number
+  top_contributions: FeatureContribution[]
+  description: string
+  timeline_summary: string
+  metadata: Record<string, unknown>
 }
 
 // ---------------------------------------------------------------------------

@@ -104,6 +104,10 @@ class BedState:
     # ── Risk Trend (§11.15) ───────────────────────────────────────────────
     risk_delta: float = 0.0                  # risk_score[-1] - risk_score[-4] (~24 sec)
 
+    # ── Explainability (ISSUE-10 layers 1-3) ──────────────────────────────
+    top_contributions: list = field(default_factory=list)
+    detection_events: list = field(default_factory=list)
+
     # ── Stale Detection (§11.4) ───────────────────────────────────────────
     last_update_server_ts: float = field(default_factory=time.time)
 
@@ -213,6 +217,14 @@ class SentinelRealtime:
         self._models = models
         self._scaler = scaler
         self._lr = lr_model
+        self._feature_names: list[str] = list(config.get("feature_names", []))
+        if len(self._feature_names) != 25:
+            logger.warning(
+                "[%s] production_config feature_names missing/invalid; "
+                "explainability contributions will use positional names.",
+                bed_id,
+            )
+            self._feature_names = [f"feature_{i}" for i in range(25)]
 
         configured_stride = int(config.get("inference_stride", _INFERENCE_STRIDE))
         if configured_stride != _INFERENCE_STRIDE:
@@ -239,6 +251,10 @@ class SentinelRealtime:
         # ── Risk history for delta computation (§11.15) ───────────────────
         # Stores recent risk scores; risk_delta = latest - score from 4 ticks ago (~24s).
         self._risk_history: list[float] = []
+
+        # ── Explainability event tracker (ISSUE-10 layers 1-3) ─────────────
+        from src.inference.detection_tracker import DetectionTracker
+        self._tracker = DetectionTracker(bed_id)
 
         # ── Thread safety (BUG-5) ─────────────────────────────────────────
         self._state_lock = threading.Lock()
@@ -320,6 +336,7 @@ class SentinelRealtime:
             self._window_scores.clear()
             self._risk_history.clear()
             self._sample_count = 0
+            self._tracker.reset()
 
     @property
     def bed_id(self) -> str:
@@ -385,9 +402,10 @@ class SentinelRealtime:
         """
         from src.features.clinical_extractor import (
             CLINICAL_FEATURE_NAMES,
-            extract_clinical_features,
+            extract_clinical_features_with_intervals,
         )
         from src.inference.alert_extractor import extract_recording_features
+        from src.inference.explainability import compute_top_contributions
 
         # _window_scores already includes the current tick score from on_new_sample().
         # BUG-6: this function is called only when current inference succeeded.
@@ -407,7 +425,13 @@ class SentinelRealtime:
         # extract_clinical_features expects normalized (2, T) — ring is already normalized.
         # Internally it denormalizes: FHR = sig*160+50, UC = sig*100 for rule-based logic.
         full_signal = np.stack([fhr_arr, uc_arr])              # (2, T) normalized
-        clin_list = extract_clinical_features(full_signal)     # List[float], len=11
+        sample_offset = max(0, self._sample_count - len(fhr_arr))
+        clinical_result = extract_clinical_features_with_intervals(
+            full_signal,
+            sample_offset=sample_offset,
+        )
+        clin_list = clinical_result["features"]                # List[float], len=11
+        clinical_intervals = clinical_result["intervals"]      # absolute sample intervals
 
         # ── 2 global features ─────────────────────────────────────────────
         all_probs = [p for _, p in self._window_scores]
@@ -446,6 +470,16 @@ class SentinelRealtime:
         # ── LR prediction ─────────────────────────────────────────────────
         x_scaled = self._scaler.transform(x)
         risk = float(self._lr.predict_proba(x_scaled)[0, 1])
+        if np.isfinite(risk):
+            top_contributions = compute_top_contributions(
+                x_raw=x[0],
+                x_scaled=x_scaled[0],
+                lr=self._lr,
+                feature_names=self._feature_names,
+                top_k=5,
+            )
+        else:
+            top_contributions = []
 
         # ── Risk trend delta (§11.15) ──────────────────────────────────────
         self._risk_history.append(risk)
@@ -468,7 +502,7 @@ class SentinelRealtime:
         # ── Clinical dict for named field assignment ─────────────────────
         clin_dict = dict(zip(CLINICAL_FEATURE_NAMES, clin_list))
 
-        return BedState(
+        state = BedState(
             bed_id=self._bed_id,
             recording_id=self._recording_id,
             timestamp=time.time(),
@@ -497,5 +531,15 @@ class SentinelRealtime:
             last_update_server_ts=time.time(),
             god_mode_active=god_mode_active,
             active_events=active_events,
+            top_contributions=top_contributions,
         )
+
+        self._tracker.update(
+            state,
+            x_raw=x[0],
+            top_contributions=top_contributions,
+            clinical_intervals=clinical_intervals,
+        )
+        state.detection_events = self._tracker.flush_pending()
+        return state
 

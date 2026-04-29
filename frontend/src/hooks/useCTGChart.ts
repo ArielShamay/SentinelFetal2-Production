@@ -17,7 +17,7 @@ import { useEffect, useRef } from 'react'
 import { createChart, ColorType, LineStyle } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, IPriceLine, Time } from 'lightweight-charts'
 import { chartUpdateBus } from '../utils/chartUpdateBus'
-import type { EventAnnotation } from '../types'
+import type { DetectionEvent, EventAnnotation } from '../types'
 
 const COLOR_FHR  = '#111827'
 const COLOR_UC   = '#6b7280'
@@ -29,6 +29,7 @@ export function useCTGChart(
   bedId: string,
   activeEvents?: EventAnnotation[],
   baselineBpm?: number,
+  detectionHistory: DetectionEvent[] = [],
 ) {
   const chartRef     = useRef<IChartApi | null>(null)
   const fhrSeries    = useRef<ISeriesApi<'Line'> | null>(null)
@@ -190,17 +191,17 @@ export function useCTGChart(
     }
   }, [baselineBpm])
 
-  // ── God Mode: event markers on FHR series ─────────────────────────────
+  // ── God Mode + Explainability markers on FHR series ───────────────────
   useEffect(() => {
     const fhr = fhrSeries.current
     if (!fhr) return
 
-    if (!activeEvents?.length) {
+    if (!activeEvents?.length && detectionHistory.length === 0) {
       try { fhr.setMarkers([]) } catch { /* ignore */ }
       return
     }
 
-    const markers = activeEvents.flatMap(e => {
+    const godMarkers = (activeEvents ?? []).flatMap(e => {
       const label = e.event_type.split('_')[0].toUpperCase().slice(0, 4)
       const result: Parameters<typeof fhr.setMarkers>[0] = [{
         time: (e.start_sample / 4.0) as Time,
@@ -219,8 +220,55 @@ export function useCTGChart(
         })
       }
       return result
-    }).sort((a, b) => (a.time as number) - (b.time as number))
+    })
+
+    const detectionLabels: Record<string, string> = {
+      lr_high_risk: 'RISK',
+      late_deceleration: 'LATE',
+      variable_deceleration: 'VAR',
+      prolonged_deceleration: 'PROL',
+      bradycardia: 'BRAD',
+      tachycardia: 'TACH',
+      low_variability: 'LOWV',
+      sinusoidal: 'SIN',
+      tachysystole: 'TS',
+    }
+
+    const detectionMarkers = detectionHistory.flatMap(e => {
+      const label = detectionLabels[e.event_type] ?? e.event_type.slice(0, 4).toUpperCase()
+      const result: Parameters<typeof fhr.setMarkers>[0] = [{
+        time: (e.start_sample / 4.0) as Time,
+        position: 'belowBar',
+        color: COLOR_FHR,
+        shape: 'arrowDown',
+        text: label,
+      }]
+      if (!e.still_ongoing && e.end_sample !== null) {
+        result.push({
+          time: (e.end_sample / 4.0) as Time,
+          position: 'aboveBar',
+          color: COLOR_UC,
+          shape: 'arrowUp',
+          text: '',
+        })
+      }
+      if (e.event_type === 'lr_high_risk' && e.peak_sample !== e.start_sample) {
+        result.push({
+          time: (e.peak_sample / 4.0) as Time,
+          position: 'inBar',
+          color: COLOR_FHR,
+          shape: 'circle',
+          text: '',
+        })
+      }
+      return result
+    })
+
+    const markers = [...godMarkers, ...detectionMarkers]
+      .sort((a, b) => (a.time as number) - (b.time as number))
 
     try { fhr.setMarkers(markers) } catch { /* ignore */ }
-  }, [activeEvents])
+  }, [activeEvents, detectionHistory])
+
+  return { chartApi: chartRef.current }
 }

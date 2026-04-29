@@ -12,7 +12,7 @@ import json
 import logging
 import threading
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +30,7 @@ class AlertEvent:
     risk_score: float
     alert_on: bool          # True = alert started, False = alert cleared
     elapsed_s: float        # recording position at event time
+    top_contributions: list[dict] = field(default_factory=list)
 
 
 class AlertHistoryStore:
@@ -62,12 +63,20 @@ class AlertHistoryStore:
                 return   # no transition — skip
 
             self._last_alert_state[bed_id] = state.alert
+            top_contributions = []
+            if state.alert:
+                top_contributions = [
+                    dataclasses.asdict(item) if dataclasses.is_dataclass(item) else dict(item)
+                    for item in getattr(state, "top_contributions", [])[:5]
+                ]
+
             event = AlertEvent(
                 bed_id=bed_id,
                 timestamp=state.timestamp,
                 risk_score=state.risk_score,
                 alert_on=state.alert,
                 elapsed_s=state.elapsed_seconds,
+                top_contributions=top_contributions,
             )
             self._store.setdefault(bed_id, deque(maxlen=self.MAX_PER_BED)).append(event)
 
@@ -114,6 +123,8 @@ class AlertHistoryStore:
                         continue
                     try:
                         d = json.loads(line)
+                        if "top_contributions" not in d:
+                            d["top_contributions"] = []
                         event = AlertEvent(**d)
                         self._store.setdefault(
                             event.bed_id, deque(maxlen=self.MAX_PER_BED)

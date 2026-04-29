@@ -5,11 +5,13 @@
 // Stable: → arrow
 
 import React from 'react'
+import type { FeatureContribution } from '../../types'
 
 interface Props {
   riskScore: number    // 0..1
   riskDelta: number    // signed change since last window
   alert: boolean
+  topContribution?: FeatureContribution
 }
 
 function DeltaArrow({ delta }: { delta: number }) {
@@ -18,7 +20,7 @@ function DeltaArrow({ delta }: { delta: number }) {
   return <span className="text-gray-400">→</span>
 }
 
-export const RiskGauge: React.FC<Props> = ({ riskScore, riskDelta, alert }) => {
+export const RiskGauge: React.FC<Props> = ({ riskScore, riskDelta, alert, topContribution }) => {
   const pct = Math.max(0, Math.min(100, Math.round(riskScore * 100)))
 
   return (
@@ -45,6 +47,12 @@ export const RiskGauge: React.FC<Props> = ({ riskScore, riskDelta, alert }) => {
           }}
         />
       </div>
+
+      {topContribution && (
+        <div className="text-xs text-gray-500">
+          סיבה עיקרית: <span className="font-medium text-gray-700">{topContribution.friendly_label}</span>
+        </div>
+      )}
     </div>
   )
 }

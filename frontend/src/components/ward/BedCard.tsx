@@ -19,6 +19,9 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
 
   const riskPct   = Math.round(bed.riskScore * 100)
   const alertBorder = bed.alert ? 'border-2 border-red-400' : 'border border-gray-200'
+  const activeReason =
+    bed.detectionHistory.find(e => e.still_ongoing && e.event_type === 'lr_high_risk')
+    ?? bed.detectionHistory.find(e => e.still_ongoing)
 
   const handleClick = useCallback(() => onClick(bed.bedId), [onClick, bed.bedId])
 
@@ -75,6 +78,12 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
       <span className="text-xs text-gray-400 font-mono">
         {bed.recordingId}
       </span>
+
+      {activeReason && (
+        <span className="text-[11px] text-gray-600 truncate">
+          סיבה: {activeReason.description}
+        </span>
+      )}
 
       {/* Mini CTG strip — canvas-based sparkline, no heavyweight chart library */}
       <div className="w-full h-28 mt-1 rounded overflow-hidden">

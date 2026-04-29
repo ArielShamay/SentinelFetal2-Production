@@ -6,7 +6,7 @@ All field names and types are kept in sync with BedState dataclass.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -14,6 +14,30 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # WebSocket message schemas
 # ---------------------------------------------------------------------------
+
+class FeatureContributionSchema(BaseModel):
+    name: str
+    friendly_label: str
+    raw_value: float
+    contribution: float
+    direction: Literal["increases_risk", "decreases_risk"]
+
+
+class DetectionEventSchema(BaseModel):
+    event_id: str
+    bed_id: str
+    source: Literal["model", "rule"]
+    event_type: str
+    start_sample: int
+    end_sample: int | None = None
+    still_ongoing: bool
+    peak_risk_score: float
+    peak_sample: int
+    top_contributions: list[FeatureContributionSchema] = Field(default_factory=list)
+    description: str = ""
+    timeline_summary: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
 
 class BedUpdate(BaseModel):
     """Single-bed update — transmitted inside batch_update.updates list."""
@@ -50,6 +74,8 @@ class BedUpdate(BaseModel):
     god_mode_active: bool = False
     active_events: list = Field(default_factory=list)
     risk_delta: float = 0.0
+    top_contributions: list[FeatureContributionSchema] = Field(default_factory=list)
+    detection_events: list[DetectionEventSchema] = Field(default_factory=list)
     last_update_server_ts: float = 0.0
 
 
@@ -139,6 +165,8 @@ class BedSnapshot(BaseModel):
     god_mode_active: bool = False
     active_events: list = Field(default_factory=list)
     risk_delta: float = 0.0
+    top_contributions: list[FeatureContributionSchema] = Field(default_factory=list)
+    detection_events: list[DetectionEventSchema] = Field(default_factory=list)
 
 
 class BedListResponse(BaseModel):
@@ -156,6 +184,7 @@ class AlertEventSchema(BaseModel):
     risk_score: float
     alert_on: bool
     elapsed_s: float
+    top_contributions: list[FeatureContributionSchema] = Field(default_factory=list)
 
 
 class AlertHistoryResponse(BaseModel):

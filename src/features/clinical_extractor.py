@@ -26,7 +26,7 @@ Output: List[float] of length N_CLINICAL_FEATURES in the order above
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import Any, List
 
 import numpy as np
 
@@ -165,3 +165,85 @@ def extract_clinical_features(
         log.warning(f"[clinical_extractor] Tachysystole module failed: {exc}")
 
     return [feats[k] for k in CLINICAL_FEATURE_NAMES]
+
+
+def extract_clinical_features_with_intervals(
+    signal_normalized: np.ndarray,
+    fs: float = 4.0,
+    sample_offset: int = 0,
+) -> dict[str, Any]:
+    """Extract clinical features and time-bounded rule intervals.
+
+    This is the explainability-friendly API used by the real-time pipeline.
+    The legacy extract_clinical_features() function remains list-compatible
+    for scripts/tests that only need the 11 scalar features.
+    """
+
+    feats: dict[str, float] = dict(SAFE_DEFAULTS)
+    intervals: list[dict[str, Any]] = []
+
+    try:
+        signal_normalized = np.asarray(signal_normalized, dtype=float)
+        if signal_normalized.ndim != 2 or signal_normalized.shape[0] < 2:
+            return {
+                "features": [feats[k] for k in CLINICAL_FEATURE_NAMES],
+                "intervals": intervals,
+            }
+
+        fhr, uc = _denormalize(signal_normalized)
+        fhr_safe = np.nan_to_num(fhr, nan=130.0)
+        uc_safe = np.nan_to_num(uc, nan=0.0)
+
+    except Exception as exc:
+        log.warning(f"[clinical_extractor] Denormalization failed: {exc}")
+        return {
+            "features": [feats[k] for k in CLINICAL_FEATURE_NAMES],
+            "intervals": intervals,
+        }
+
+    try:
+        b: BaselineResult = calculate_baseline(fhr_safe, fs=fs)
+        feats["baseline_bpm"] = b.baseline_bpm
+        feats["is_tachycardia"] = b.is_tachycardia
+        feats["is_bradycardia"] = b.is_bradycardia
+    except Exception as exc:
+        log.warning(f"[clinical_extractor] Baseline module failed: {exc}")
+
+    try:
+        v: VariabilityResult = calculate_variability(fhr_safe, fs=fs)
+        feats["variability_amplitude_bpm"] = v.amplitude_bpm
+        feats["variability_category"] = v.category
+    except Exception as exc:
+        log.warning(f"[clinical_extractor] Variability module failed: {exc}")
+
+    try:
+        d: DecelerationSummary = detect_decelerations(
+            fhr_safe,
+            uc_safe,
+            fs=fs,
+            sample_offset=sample_offset,
+        )
+        feats["n_late_decelerations"] = d.n_late_decelerations
+        feats["n_variable_decelerations"] = d.n_variable_decelerations
+        feats["n_prolonged_decelerations"] = d.n_prolonged_decelerations
+        feats["max_deceleration_depth_bpm"] = d.max_deceleration_depth_bpm
+        intervals.extend(d.intervals or [])
+    except Exception as exc:
+        log.warning(f"[clinical_extractor] Decelerations module failed: {exc}")
+
+    try:
+        s: SinusoidalResult = detect_sinusoidal_pattern(fhr_safe, fs=fs)
+        feats["sinusoidal_detected"] = s.sinusoidal_detected
+    except Exception as exc:
+        log.warning(f"[clinical_extractor] Sinusoidal module failed: {exc}")
+
+    try:
+        t: TachysystoleResult = detect_tachysystole(uc_safe, fs=fs)
+        feats["tachysystole_detected"] = t.tachysystole_detected
+    except Exception as exc:
+        log.warning(f"[clinical_extractor] Tachysystole module failed: {exc}")
+
+    return {
+        "features": [feats[k] for k in CLINICAL_FEATURE_NAMES],
+        "intervals": intervals,
+    }

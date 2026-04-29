@@ -2,7 +2,8 @@
 // Full-screen detail view for a single bed.
 // Used both as a route (/bed/:id) and inside a modal (bedId prop + onClose callback).
 
-import React, { useEffect } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
+import type { IChartApi, Time } from 'lightweight-charts'
 import { useParams, Link } from 'react-router-dom'
 import { useBedStore } from '../../stores/bedStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -12,9 +13,12 @@ import { RiskGauge } from './RiskGauge'
 import { FindingsPanel } from './FindingsPanel'
 import { AlertHistory } from './AlertHistory'
 import { CTGChart } from './CTGChart'
+import { DetectionList } from './DetectionList'
+import { ExplanationPanel } from './ExplanationPanel'
 import { GodModePanel } from '../god-mode/GodModePanel'
 import { EventJournal } from '../god-mode/EventJournal'
 import { wsClient } from '../../services/wsClient'
+import type { DetectionEvent } from '../../types'
 
 interface Props {
   bedId?: string
@@ -27,6 +31,7 @@ export const DetailView: React.FC<Props> = ({ bedId: propBedId, onClose }) => {
   const bed        = useBedStore(s => id ? s.beds.get(id) : undefined)
   const isStale    = useStaleDetector(bed?.lastUpdate ?? 0)
   const godModePin = useUIStore(s => s.godModePin)
+  const [chartApi, setChartApi] = useState<IChartApi | null>(null)
 
   // Notify backend that this client is focused on this bed so it receives
   // full-rate chart ticks for the detail chart (Ruba 2).
@@ -55,6 +60,15 @@ export const DetailView: React.FC<Props> = ({ bedId: propBedId, onClose }) => {
   const mm = Math.floor(elapsed / 60).toString().padStart(2, '0')
   const ss = Math.floor(elapsed % 60).toString().padStart(2, '0')
 
+  const focusOnEvent = useCallback((event: DetectionEvent) => {
+    const chart = chartApi
+    if (!chart) return
+    const from = Math.max(0, event.start_sample / 4.0 - 60)
+    const endSample = event.end_sample ?? event.start_sample
+    const to = Math.max(from + 30, endSample / 4.0 + 60)
+    chart.timeScale().setVisibleRange({ from: from as Time, to: to as Time })
+  }, [chartApi])
+
   return (
     <div className={['flex flex-col gap-4 p-4', isStale ? 'opacity-80' : ''].join(' ')}>
       {/* Back + header */}
@@ -81,18 +95,30 @@ export const DetailView: React.FC<Props> = ({ bedId: propBedId, onClose }) => {
           riskScore={bed.riskScore}
           riskDelta={bed.riskDelta}
           alert={bed.alert}
+          topContribution={bed.topContributions[0]}
         />
       </div>
 
       {/* God Mode panel */}
       <GodModePanel bedId={bed.bedId} />
 
-      {/* CTG chart — activeEvents drive timeline markers, baselineBpm draws reference line */}
-      <CTGChart bedId={bed.bedId} activeEvents={bed.activeEvents} baselineBpm={bed.baselineBpm} />
+      {/* CTG chart — detectionHistory drives persistent explainability overlays */}
+      <CTGChart
+        bedId={bed.bedId}
+        activeEvents={bed.activeEvents}
+        baselineBpm={bed.baselineBpm}
+        detectionHistory={bed.detectionHistory}
+        onChartReady={setChartApi}
+      />
 
       {/* Lower panels */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <FindingsPanel bed={bed} />
+        <FindingsPanel bed={bed} topContributions={bed.topContributions} />
+        <ExplanationPanel topContributions={bed.topContributions} warmup={bed.warmup} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <DetectionList events={bed.detectionHistory} onSelect={focusOnEvent} />
         <AlertHistory bedId={bed.bedId} />
       </div>
 

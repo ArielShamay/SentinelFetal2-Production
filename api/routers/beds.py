@@ -153,6 +153,7 @@ def get_bed_alerts(
             risk_score=e.risk_score,
             alert_on=e.alert_on,
             elapsed_s=e.elapsed_s,
+            top_contributions=e.top_contributions,
         )
         for e in events
     ]

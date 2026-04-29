@@ -3,7 +3,7 @@
 // Ring buffer sizes: fhrRing=2400, ucRing=2400 (10 min @ 4Hz), riskHistory=600 (60 min / 6s)
 
 import { create } from 'zustand'
-import type { BedUpdate, EventAnnotation } from '../types'
+import type { BedUpdate, DetectionEvent, EventAnnotation, FeatureContribution } from '../types'
 import { RingBuffer } from '../utils/ringBuffer'
 import { playAlertTone } from '../utils/alertSound'
 import { chartUpdateBus } from '../utils/chartUpdateBus'
@@ -11,6 +11,7 @@ import { chartUpdateBus } from '../utils/chartUpdateBus'
 // Sizes from PLAN.md §5
 const FHR_RING_SIZE = 2400   // 10 min × 60s × 4Hz
 const RISK_RING_SIZE = 600   // 60 min × 10 points/min (1 per 6s)
+const DETECTION_HISTORY_LIMIT = 256
 
 export interface BedData {
   bedId: string
@@ -41,6 +42,8 @@ export interface BedData {
   godModeActive: boolean
   activeEvents: EventAnnotation[]   // from WebSocket, updated each BedUpdate
   riskDelta: number
+  topContributions: FeatureContribution[]
+  detectionHistory: DetectionEvent[] // session-local explainability events
   lastUpdate: number    // Unix seconds; used by useStaleDetector
 }
 
@@ -54,6 +57,35 @@ interface BedStore {
   setConnected: (v: boolean) => void
   setHeartbeat: (ts: number) => void
   reset: () => void
+}
+
+function sameTopContributions(
+  prev: FeatureContribution[],
+  next: FeatureContribution[],
+): boolean {
+  if (prev.length !== next.length) return false
+  for (let i = 0; i < prev.length; i++) {
+    if (prev[i].name !== next[i].name) return false
+    if (prev[i].contribution !== next[i].contribution) return false
+  }
+  return true
+}
+
+function mergeDetectionHistory(
+  existing: DetectionEvent[],
+  deltas: DetectionEvent[],
+): DetectionEvent[] {
+  if (deltas.length === 0) return existing
+
+  const byId = new Map(existing.map(event => [event.event_id, event]))
+  for (const event of deltas) {
+    const prev = byId.get(event.event_id)
+    byId.set(event.event_id, prev ? { ...prev, ...event } : event)
+  }
+
+  return [...byId.values()]
+    .sort((a, b) => a.start_sample - b.start_sample)
+    .slice(-DETECTION_HISTORY_LIMIT)
 }
 
 function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
@@ -84,6 +116,8 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
     godModeActive: false,
     activeEvents: [],
     riskDelta: 0,
+    topContributions: [],
+    detectionHistory: [],
     lastUpdate: 0,
   }
 
@@ -100,6 +134,15 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
   if (!prevAlert && u.alert) {
     playAlertTone()
   }
+
+  const incomingTopContributions = u.top_contributions ?? []
+  const topContributions = sameTopContributions(bed.topContributions, incomingTopContributions)
+    ? bed.topContributions
+    : incomingTopContributions
+  const detectionHistory = mergeDetectionHistory(
+    bed.detectionHistory,
+    u.detection_events ?? [],
+  )
 
   return {
     ...bed,
@@ -126,6 +169,8 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
     godModeActive: u.god_mode_active,
     activeEvents: u.active_events,
     riskDelta: u.risk_delta,
+    topContributions,
+    detectionHistory,
     lastUpdate: u.last_update_server_ts > 0
       ? u.last_update_server_ts
       : Date.now() / 1000,

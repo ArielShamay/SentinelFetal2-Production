@@ -71,6 +71,7 @@ class DecelerationSummary:
     n_variable_decelerations:  float = 0.0
     n_prolonged_decelerations: float = 0.0
     max_deceleration_depth_bpm: float = 0.0
+    intervals: list[dict] | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -221,6 +222,7 @@ def detect_decelerations(
     fhr: np.ndarray,
     uc: np.ndarray,
     fs: float = 4.0,
+    sample_offset: int = 0,
 ) -> DecelerationSummary:
     """Detect and classify FHR decelerations.
 
@@ -228,6 +230,8 @@ def detect_decelerations(
         fhr: FHR signal in bpm, shape (T,).
         uc:  UC signal in mmHg, shape (T,).
         fs:  Sampling frequency in Hz (default 4.0).
+        sample_offset: Absolute sample index of fhr[0]. Intervals returned in
+                       DecelerationSummary are absolute recording samples.
 
     Returns:
         DecelerationSummary with counts and max depth.
@@ -248,6 +252,7 @@ def detect_decelerations(
         n_var     = 0
         n_prolong = 0
         max_depth = 0.0
+        intervals: list[dict] = []
 
         for start, end in events:
             duration_s = (end - start) / fs
@@ -264,6 +269,14 @@ def detect_decelerations(
             # ── Prolonged (≥2 min): classify first, don't double-count ────────
             if duration_s >= PROLONGED_MIN_S:
                 n_prolong += 1
+                intervals.append({
+                    "event_type": "prolonged_deceleration",
+                    "start_sample": int(sample_offset + start),
+                    "end_sample": int(sample_offset + end),
+                    "nadir_sample": int(sample_offset + nadir_idx),
+                    "depth_bpm": depth,
+                    "duration_s": duration_s,
+                })
                 continue
 
             # ── True onset-to-nadir → abrupt vs gradual ───────────────────────
@@ -273,6 +286,15 @@ def detect_decelerations(
             if descent_s < VARIABLE_ONSET_S:
                 # Abrupt onset → Variable deceleration
                 n_var += 1
+                intervals.append({
+                    "event_type": "variable_deceleration",
+                    "start_sample": int(sample_offset + onset_idx),
+                    "end_sample": int(sample_offset + end),
+                    "nadir_sample": int(sample_offset + nadir_idx),
+                    "depth_bpm": depth,
+                    "duration_s": duration_s,
+                    "descent_s": descent_s,
+                })
             else:
                 # Gradual onset → Late or Early (benign)
                 # Requires a visible UC peak to determine timing
@@ -282,6 +304,16 @@ def detect_decelerations(
                     # No identifiable contraction: cannot classify as late/early.
                     # Conservatively count as variable rather than assume late.
                     n_var += 1
+                    intervals.append({
+                        "event_type": "variable_deceleration",
+                        "start_sample": int(sample_offset + onset_idx),
+                        "end_sample": int(sample_offset + end),
+                        "nadir_sample": int(sample_offset + nadir_idx),
+                        "depth_bpm": depth,
+                        "duration_s": duration_s,
+                        "descent_s": descent_s,
+                        "uc_peak_sample": None,
+                    })
                     continue
 
                 # Nadir lag relative to UC peak:
@@ -290,6 +322,17 @@ def detect_decelerations(
                 nadir_lag_s = (nadir_idx - uc_peak_idx) / fs
                 if nadir_lag_s > LATE_NADIR_LAG_S:
                     n_late += 1
+                    intervals.append({
+                        "event_type": "late_deceleration",
+                        "start_sample": int(sample_offset + onset_idx),
+                        "end_sample": int(sample_offset + end),
+                        "nadir_sample": int(sample_offset + nadir_idx),
+                        "depth_bpm": depth,
+                        "duration_s": duration_s,
+                        "descent_s": descent_s,
+                        "uc_peak_sample": int(sample_offset + uc_peak_idx),
+                        "nadir_lag_s": nadir_lag_s,
+                    })
                 # Early decelerations (benign): intentionally not counted
 
         return DecelerationSummary(
@@ -297,6 +340,7 @@ def detect_decelerations(
             n_variable_decelerations   = float(n_var),
             n_prolonged_decelerations  = float(n_prolong),
             max_deceleration_depth_bpm = max_depth,
+            intervals                  = intervals,
         )
 
     except Exception as exc:
