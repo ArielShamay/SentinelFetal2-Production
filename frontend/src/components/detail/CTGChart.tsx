@@ -14,6 +14,7 @@ interface Props {
   activeEvents?: EventAnnotation[]
   baselineBpm?: number
   detectionHistory?: DetectionEvent[]
+  recordingStartWallTs?: number
   onChartReady?: (chart: IChartApi | null) => void
 }
 
@@ -22,11 +23,19 @@ export const CTGChart: React.FC<Props> = ({
   activeEvents,
   baselineBpm,
   detectionHistory = [],
+  recordingStartWallTs = 0,
   onChartReady,
 }) => {
   const wrapperRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const { chartApi } = useCTGChart(containerRef, bedId, activeEvents, baselineBpm, detectionHistory)
+  const { chartApi } = useCTGChart(
+    containerRef,
+    bedId,
+    activeEvents,
+    baselineBpm,
+    detectionHistory,
+    recordingStartWallTs,
+  )
 
   useEffect(() => {
     onChartReady?.(chartApi)

@@ -87,7 +87,11 @@ export const BedCard: React.FC<Props> = React.memo(({ bed, onClick }) => {
 
       {/* Mini CTG strip — canvas-based sparkline, no heavyweight chart library */}
       <div className="w-full h-28 mt-1 rounded overflow-hidden">
-        <Sparkline bedId={bed.bedId} />
+        <Sparkline
+          bedId={bed.bedId}
+          detectionHistory={bed.detectionHistory}
+          baselineBpm={bed.baselineBpm}
+        />
       </div>
     </button>
   )

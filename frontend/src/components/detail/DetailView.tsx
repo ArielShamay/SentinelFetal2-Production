@@ -9,6 +9,7 @@ import { useBedStore } from '../../stores/bedStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useStaleDetector } from '../../hooks/useStaleDetector'
 import { StatusBadge } from '../common/StatusBadge'
+import { IsraelClock } from '../common/IsraelClock'
 import { RiskGauge } from './RiskGauge'
 import { FindingsPanel } from './FindingsPanel'
 import { AlertHistory } from './AlertHistory'
@@ -56,10 +57,6 @@ export const DetailView: React.FC<Props> = ({ bedId: propBedId, onClose }) => {
     )
   }
 
-  const elapsed = bed.elapsedSeconds
-  const mm = Math.floor(elapsed / 60).toString().padStart(2, '0')
-  const ss = Math.floor(elapsed % 60).toString().padStart(2, '0')
-
   const focusOnEvent = useCallback((event: DetectionEvent) => {
     const chart = chartApi
     if (!chart) return
@@ -85,7 +82,7 @@ export const DetailView: React.FC<Props> = ({ bedId: propBedId, onClose }) => {
           {isStale   && <StatusBadge variant="stale" />}
           {bed.alert  && <StatusBadge variant="alert" />}
           {!bed.alert && !isStale && !bed.warmup && <StatusBadge variant="live" />}
-          <span className="text-xs font-mono text-gray-500">{mm}:{ss}</span>
+          <IsraelClock />
         </div>
       </div>
 
@@ -108,6 +105,7 @@ export const DetailView: React.FC<Props> = ({ bedId: propBedId, onClose }) => {
         activeEvents={bed.activeEvents}
         baselineBpm={bed.baselineBpm}
         detectionHistory={bed.detectionHistory}
+        recordingStartWallTs={bed.recordingStartWallTs}
         onChartReady={setChartApi}
       />
 
@@ -118,7 +116,11 @@ export const DetailView: React.FC<Props> = ({ bedId: propBedId, onClose }) => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <DetectionList events={bed.detectionHistory} onSelect={focusOnEvent} />
+        <DetectionList
+          events={bed.detectionHistory}
+          recordingStartWallTs={bed.recordingStartWallTs}
+          onSelect={focusOnEvent}
+        />
         <AlertHistory bedId={bed.bedId} />
       </div>
 

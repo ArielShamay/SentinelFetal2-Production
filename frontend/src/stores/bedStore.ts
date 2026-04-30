@@ -37,6 +37,7 @@ export interface BedData {
   tachysystoleDetected: boolean
   // Meta
   elapsedSeconds: number
+  recordingStartWallTs: number
   warmup: boolean
   sampleCount: number
   godModeActive: boolean
@@ -111,6 +112,7 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
     sinusoidalDetected: false,
     tachysystoleDetected: false,
     elapsedSeconds: 0,
+    recordingStartWallTs: Date.now() / 1000,
     warmup: true,
     sampleCount: 0,
     godModeActive: false,
@@ -143,6 +145,8 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
     bed.detectionHistory,
     u.detection_events ?? [],
   )
+  const serverTs = u.last_update_server_ts > 0 ? u.last_update_server_ts : Date.now() / 1000
+  const recordingStartWallTs = serverTs - u.elapsed_seconds
 
   return {
     ...bed,
@@ -164,6 +168,7 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
     sinusoidalDetected: u.sinusoidal_detected,
     tachysystoleDetected: u.tachysystole_detected,
     elapsedSeconds: u.elapsed_seconds,
+    recordingStartWallTs,
     warmup: u.warmup,
     sampleCount: u.sample_count,
     godModeActive: u.god_mode_active,
@@ -171,9 +176,7 @@ function applyUpdate(existing: BedData | undefined, u: BedUpdate): BedData {
     riskDelta: u.risk_delta,
     topContributions,
     detectionHistory,
-    lastUpdate: u.last_update_server_ts > 0
-      ? u.last_update_server_ts
-      : Date.now() / 1000,
+    lastUpdate: serverTs,
   }
 }
 

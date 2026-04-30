@@ -17,6 +17,7 @@ import { useEffect, useRef } from 'react'
 import { createChart, ColorType, LineStyle } from 'lightweight-charts'
 import type { IChartApi, ISeriesApi, IPriceLine, Time } from 'lightweight-charts'
 import { chartUpdateBus } from '../utils/chartUpdateBus'
+import { formatIsraelTime } from '../utils/israelTime'
 import type { DetectionEvent, EventAnnotation } from '../types'
 
 const COLOR_FHR   = '#111827'
@@ -43,6 +44,7 @@ export function useCTGChart(
   activeEvents?: EventAnnotation[],
   baselineBpm?: number,
   detectionHistory: DetectionEvent[] = [],
+  recordingStartWallTs = 0,
 ) {
   const chartRef     = useRef<IChartApi | null>(null)
   const fhrSeries    = useRef<ISeriesApi<'Line'> | null>(null)
@@ -69,7 +71,15 @@ export function useCTGChart(
       },
       rightPriceScale: { visible: true, borderColor: COLOR_GRID },
       leftPriceScale:  { visible: true, borderColor: COLOR_GRID },
-      timeScale: { borderColor: COLOR_GRID, timeVisible: true, secondsVisible: false },
+      localization: {
+        timeFormatter: (time: Time) => formatIsraelTime(recordingStartWallTs + Number(time), true),
+      },
+      timeScale: {
+        borderColor: COLOR_GRID,
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time: Time) => formatIsraelTime(recordingStartWallTs + Number(time), false),
+      },
       crosshair: { mode: 0 },
     })
     chartRef.current = chart
@@ -107,7 +117,7 @@ export function useCTGChart(
       ucSeries.current     = null
       baselineLine.current = null
     }
-  }, [containerRef])
+  }, [containerRef, recordingStartWallTs])
 
   // ── History + live subscription with RAF batching ──────────────────────
   useEffect(() => {

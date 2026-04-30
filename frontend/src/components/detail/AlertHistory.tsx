@@ -3,6 +3,7 @@
 
 import React, { useEffect, useState } from 'react'
 import type { AlertHistoryResponse, AlertEventSchema } from '../../types'
+import { formatIsraelTime, formatIsraelTimeWithDate } from '../../utils/israelTime'
 
 interface Props {
   bedId: string
@@ -41,7 +42,7 @@ export const AlertHistory: React.FC<Props> = ({ bedId }) => {
           <table className="w-full text-xs border-collapse">
             <thead>
               <tr className="text-gray-500 border-b border-gray-200">
-                <th className="text-left pr-2 py-0.5 font-medium">Time (s)</th>
+                <th className="text-left pr-2 py-0.5 font-medium">Time (IST)</th>
                 <th className="text-left pr-2 py-0.5 font-medium">Score</th>
                 <th className="text-left py-0.5 font-medium">Alert</th>
               </tr>
@@ -49,7 +50,9 @@ export const AlertHistory: React.FC<Props> = ({ bedId }) => {
             <tbody>
               {events.map((ev, i) => (
                 <tr key={i} className="border-b border-gray-50 last:border-0">
-                  <td className="pr-2 py-0.5 font-mono">{ev.elapsed_s.toFixed(0)}</td>
+                  <td className="pr-2 py-0.5 font-mono" title={formatIsraelTimeWithDate(ev.timestamp)}>
+                    {formatIsraelTime(ev.timestamp, true)}
+                  </td>
                   <td className="pr-2 py-0.5 font-mono">{(ev.risk_score * 100).toFixed(0)}%</td>
                   <td className="py-0.5 text-gray-700">{ev.alert_on ? 'ON' : 'OFF'}</td>
                 </tr>
